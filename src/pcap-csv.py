@@ -8,7 +8,7 @@ from scipy.stats import entropy
 
 
 def load_datasets(path):
-    """Load dataset from CSV or PCAP file."""
+    """Load dataset from PCAP file."""
     if path.endswith('.csv'):
         data = pd.read_csv(path)
     elif path.endswith('.pcap') or path.endswith('.pcapng'):

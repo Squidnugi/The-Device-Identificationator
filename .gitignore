@@ -1,2 +1,9 @@
 data/*
 !data/.gitkeep
+logs/*
+!logs/.gitkeep
+output/*
+!output/.gitkeep
+__pycache__/*
+*.pyc
+auth.json

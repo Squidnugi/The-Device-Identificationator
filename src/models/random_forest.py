@@ -212,10 +212,10 @@ def train_model():
     print("Model training complete.")
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
-def use_model():
+def use_model(file_path='data/processed/16-09-24_extracted.csv'):
     """use the random forest model"""
     print("loading dataset")
-    data = load_datasets('data/processed/16-09-24_extracted.csv')
+    data = load_datasets(file_path)
     print("loading model")
     model, label_encoders, scaler = load_model('models/random_forest_model')
     print("encoding data")
@@ -224,7 +224,7 @@ def use_model():
     X, _, _ = dataset_split(endata, 'Device_Type', scaler=scaler)
     print("predicting")
     results = random_forest_model(X, 'use', model=model, label_encoders=label_encoders, mac_addresses=data.get('eth.src'))
-    print(results.to_string())
+    return results
 
 
 if __name__ == "__main__":

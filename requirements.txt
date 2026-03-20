@@ -6,3 +6,6 @@ pytest
 flask
 sqlalchemy
 pickle
+scapy
+psutil
+bcrypt
