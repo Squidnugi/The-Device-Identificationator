@@ -262,12 +262,12 @@ def save_dataframe_to_csv(df, output_path):
     except Exception as e:
         print(f"Error saving DataFrame to CSV: {e}")
 
-
-
-
-if __name__ == "__main__":
-    pcap_path = 'data/raw/16-09-24.pcap'
-    output_csv_path = 'data/processed/16-09-24_extracted.csv'
+def process_pcap(File="16-09-24.pcap", save_to_csv=True):
+    raw_path = "data/raw/"
+    processed_path = "data/processed/"
+    pcap_path = raw_path + File
+    output_csv_path = processed_path + File.replace('.pcap', '_extracted.csv')
+    
     time_start = time.time()
     print(f"\n{'='*70}")
     print(f"PCAP Processing Pipeline")
@@ -288,9 +288,10 @@ if __name__ == "__main__":
         
         df = clean_data(df)
         
-        print("Saving to CSV...")
-        save_dataframe_to_csv(df, output_csv_path)
-        print("✓ CSV saved\n")
+        if save_to_csv:
+            print("Saving to CSV...")
+            save_dataframe_to_csv(df, output_csv_path)
+            print("✓ CSV saved\n")
     
     time_end = time.time()
     elapsed = time_end - time_start
@@ -298,3 +299,10 @@ if __name__ == "__main__":
     print(f"✓ Processing completed!")
     print(f"Total time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
     print(f"{'='*70}\n")
+    if not save_to_csv:
+        return df
+    return None
+
+
+if __name__ == "__main__":
+    process_pcap(File='16-09-24.pcap', save_to_csv=True)

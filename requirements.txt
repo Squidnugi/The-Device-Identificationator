@@ -3,7 +3,6 @@ numpy
 matplotlib
 scikit-learn
 pytest
-flask
 sqlalchemy
 pickle
 scapy

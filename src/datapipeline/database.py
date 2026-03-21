@@ -123,6 +123,17 @@ def add_device(devices, network):
         _add_model_instance(db, device)
     db.close()
 
+def get_devices_by_network(network_name):
+    """Get all devices associated with a specific network"""
+    db = SessionLocal()
+    network = db.query(Network).filter_by(network_name=network_name).first()
+    if not network:
+        db.close()
+        raise ValueError(f"Network '{network_name}' not found.")
+    devices = network.devices
+    db.close()
+    return devices
+
 # ============================================================================
 # Models
 # ============================================================================
@@ -166,8 +177,9 @@ if __name__ == "__main__":
     # Get a session
     db = SessionLocal()
     
-    network, created = get_or_create(db, Network, network_name="Home_Network")
-    print(f"Network '{network.network_name}' {'created' if created else 'already exists'}.")
+    devices = get_devices_by_network("Default_Network")
+    for device in devices:
+        print(f"Device: {device.device_name}, MAC: {device.mac_address}, Confidence: {device.confidence}")
     
     db.close()
 

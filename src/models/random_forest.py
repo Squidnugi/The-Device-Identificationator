@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 from ucimlrepo import fetch_ucirepo 
 from sklearn.ensemble import RandomForestClassifier
@@ -212,10 +214,18 @@ def train_model():
     print("Model training complete.")
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
-def use_model(file_path='data/processed/16-09-24_extracted.csv'):
+def use_model(file_path='data/processed/16-09-24_extracted.csv', dataset=None):
     """use the random forest model"""
-    print("loading dataset")
-    data = load_datasets(file_path)
+    if not os.path.exists('models/random_forest_model.pkl'):
+        raise FileNotFoundError("Model file not found. Please train the model first.")
+    if dataset is not None:
+        print("Using provided dataset.")
+        data = dataset
+    else:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Dataset file '{file_path}' not found. Please ensure the file exists.")
+        print("loading dataset")
+        data = load_datasets(file_path)
     print("loading model")
     model, label_encoders, scaler = load_model('models/random_forest_model')
     print("encoding data")

@@ -5,13 +5,13 @@ from scapy.all import sniff, wrpcap
 import os
 
 
-def capture_packets_windows(packet_count=100):
+def capture_packets_windows(packet_count=100, output_file="data/raw/demo_capture.pcap"):
 	"""Capture packets on a specified interface and save to a pcap file (Windows version)."""
 	try:
 		print("Capturing packets on Windows...")
 		packets = sniff(packet_count)
-		wrpcap("data/raw/demo_capture.pcap", packets)
-		print("Packets saved to data/raw/demo_capture.pcap")
+		wrpcap(output_file, packets)
+		print(f"Packets saved to {output_file}")
 	except Exception as e:
 		print(f"Error capturing packets: {e}")
 
