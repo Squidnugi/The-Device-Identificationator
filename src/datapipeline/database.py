@@ -102,25 +102,32 @@ def delete_data(db, model, filters):
 
 def add_to_network(network_name):
     """Add a new network to the database"""
-    db = SessionLocal()
-    network, created = get_or_create(db, Network, network_name=network_name)
-    db.close()
-    return network, created
+    try:
+        db = SessionLocal()
+        network, created = get_or_create(db, Network, network_name=network_name)
+        db.close()
+        return network, created
+    except Exception as e:
+        print(f"Error adding network: {e}")
+        return None, False
 
 def add_device(devices, network):
     """Add a new device to the database"""
     db = SessionLocal()
     network_id = network.id if isinstance(network, Network) else db.query(Network).filter_by(network_name=network).first().id
     for i in devices.to_dict(orient="records"):
-        device = Device(
-            device_name=i.get('Predicted_Device'),
-            device_type=i.get('Predicted_Device'),
-            mac_address=i.get('MAC_Address'),
-            ip_address=i.get('IP_Address'),
-            confidence=i.get('Confidence'),
-            Network_id=network_id
-        )
-        _add_model_instance(db, device)
+        try:
+            device = Device(
+                device_name=i.get('Predicted_Device'),
+                device_type=i.get('Predicted_Device'),
+                mac_address=i.get('MAC_Address'),
+                ip_address=i.get('IP_Address'),
+                confidence=i.get('Confidence'),
+                Network_id=network_id
+            )
+            _add_model_instance(db, device)
+        except IntegrityError:
+            print(f"Device with MAC {i.get('MAC_Address')} already exists. Skipping.")
     db.close()
 
 def get_devices_by_network(network_name):
@@ -133,6 +140,14 @@ def get_devices_by_network(network_name):
     devices = network.devices
     db.close()
     return devices
+
+
+def all_networks():
+    """Get a list of all networks in the database"""
+    db = SessionLocal()
+    networks = db.query(Network).all()
+    db.close()
+    return networks
 
 # ============================================================================
 # Models

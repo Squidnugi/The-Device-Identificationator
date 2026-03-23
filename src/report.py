@@ -1,3 +1,4 @@
+"""Report generation module for summarizing network data and device information."""
 import pandas as pd
 from . import datapipeline as datapipeline
 import os
@@ -8,7 +9,7 @@ def _resolve_report_output_path(traffic_file, report_file):
     report_dir = os.path.dirname(report_file) or 'data/reports'
     os.makedirs(report_dir, exist_ok=True)
 
-    report_ext = os.path.splitext(report_file)[1] or '.csv'
+    report_ext = '.txt'
     traffic_stem = os.path.splitext(os.path.basename(traffic_file))[0]
     if traffic_stem.endswith('_extracted'):
         traffic_stem = traffic_stem[:-10]
@@ -57,9 +58,32 @@ def generate_report(traffic_file, report_file, network=None):
 
         report_df = pd.DataFrame(report_rows, columns=['device_name', 'device_type', 'mac_address', 'total_packets'])
         resolved_report_file = _resolve_report_output_path(traffic_file, report_file)
-        report_df.to_csv(resolved_report_file, index=False)
+
+        lines = [
+            "Device Identification Report",
+            f"Generated at: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Network: {network or 'N/A'}",
+            f"Source file: {traffic_file}",
+            "",
+        ]
+
+        if report_df.empty:
+            lines.append("No devices found for this network.")
+        else:
+            columns = ['device_name', 'device_type', 'mac_address', 'total_packets']
+            widths = {
+                col: max(len(col), report_df[col].astype(str).map(len).max())
+                for col in columns
+            }
+            lines.append("  ".join(f"{col:<{widths[col]}}" for col in columns))
+            lines.append("  ".join("-" * widths[col] for col in columns))
+            for _, row in report_df.iterrows():
+                lines.append("  ".join(f"{str(row[col]):<{widths[col]}}" for col in columns))
+
+        with open(resolved_report_file, 'w', encoding='utf-8') as report_handle:
+            report_handle.write("\n".join(lines))
+
         report_df.attrs['report_file'] = resolved_report_file
-        print(f"Report generated and saved to {resolved_report_file}")
         return report_df
     except Exception as e:
         print(f"Error generating report: {e}")

@@ -1,5 +1,5 @@
 from .models import train_model, use_model
-from .datapipeline import create_all_tables, drop_all_tables, capture_packets, add_to_network, add_device, get_devices_by_network, process_pcap
+from .datapipeline import create_all_tables, drop_all_tables, capture_packets, add_to_network, add_device, get_devices_by_network, process_pcap, all_networks
 from .security import set_password, verify_password, is_password_set
 from .report import generate_report
 
@@ -22,5 +22,6 @@ __all__ = [
     "add_device",
     "get_devices_by_network",
     "process_pcap",
-    "generate_report"
+    "generate_report",
+    "all_networks"
 ]
