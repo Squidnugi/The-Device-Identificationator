@@ -1,8 +1,3 @@
-"""
-TUI dashboard for Device Identificationator.
-Parses report .txt files produced by report.py and renders them
-as a live Textual dashboard, styled after the demo in tests/tui.py.
-"""
 from __future__ import annotations
 
 import os
@@ -19,12 +14,24 @@ from rich.table import Table
 from rich.text import Text
 
 from textual.app import App, ComposeResult
+from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
 
 # ---------------------------------------------------------------------------
 # Report parsing
 # ---------------------------------------------------------------------------
+
+@dataclass
+class DeviceRow:
+    device_name: str
+    device_type: str
+    mac_address: str
+    confidence: str
+    total_packets: str
+    flagged: bool = False
+    foreign: bool = False
+
 
 @dataclass
 class ParsedReport:
@@ -37,29 +44,23 @@ class ParsedReport:
     foreign_count: int = 0
     total_packets: int = 0
     avg_confidence: float = 0.0
-    devices: List[dict] = field(default_factory=list)   # all devices
-    flagged: List[dict] = field(default_factory=list)   # flagged subset
+    devices: List[DeviceRow] = field(default_factory=list)
+    flagged: List[DeviceRow] = field(default_factory=list)
     raw_path: str = ""
 
 
 def _parse_summary_line(line: str, key: str) -> Optional[str]:
-    pattern = rf"^{re.escape(key)}\s*:\s*(.+)$"
-    match = re.match(pattern, line.strip())
+    match = re.match(rf"^{re.escape(key)}\s*:\s*(.+)$", line.strip())
     return match.group(1).strip() if match else None
 
 
-def _parse_table_rows(lines: List[str], start_idx: int) -> List[dict]:
-    """
-    Parse a fixed-width table.
-    Derives column boundaries from the separator (dash) line.
-    Recognises [FLAGGED] and [FOREIGN] row markers.
-    """
+def _parse_table_rows(lines: List[str], start_idx: int) -> List[DeviceRow]:
     rows = []
-    if start_idx >= len(lines):
+    if start_idx + 1 >= len(lines):
         return rows
 
-    header_line = lines[start_idx] if start_idx < len(lines) else ""
-    sep_line = lines[start_idx + 1] if start_idx + 1 < len(lines) else ""
+    header_line = lines[start_idx]
+    sep_line = lines[start_idx + 1]
 
     if not sep_line.strip() or not all(c in "-  " for c in sep_line):
         return rows
@@ -86,11 +87,20 @@ def _parse_table_rows(lines: List[str], start_idx: int) -> List[dict]:
         foreign = stripped.endswith("[FOREIGN]")
         flagged = stripped.endswith("[FLAGGED]") or foreign
         clean = re.sub(r"\s*\[(FLAGGED|FOREIGN)\]$", "", stripped)
-        values = [clean[s:e].strip() if e <= len(clean) else clean[s:].strip() for s, e in col_spans]
-        row = dict(zip(headers, values))
-        row["_flagged"] = flagged
-        row["_foreign"] = foreign
-        rows.append(row)
+        values = [
+            clean[s:e].strip() if e <= len(clean) else clean[s:].strip()
+            for s, e in col_spans
+        ]
+        d = dict(zip(headers, values))
+        rows.append(DeviceRow(
+            device_name=d.get("device_name", ""),
+            device_type=d.get("device_type", ""),
+            mac_address=d.get("mac_address", ""),
+            confidence=d.get("confidence", "0.0"),
+            total_packets=d.get("total_packets", "0"),
+            flagged=flagged,
+            foreign=foreign,
+        ))
 
     return rows
 
@@ -98,16 +108,11 @@ def _parse_table_rows(lines: List[str], start_idx: int) -> List[dict]:
 def parse_report(path: str) -> ParsedReport:
     report = ParsedReport(raw_path=path)
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            raw_lines = fh.read().splitlines()
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
     except Exception:
         return report
 
-    lines = raw_lines
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
+    for i, line in enumerate(lines):
         for label, attr in [
             ("Generated at", "generated_at"),
             ("Network", "network"),
@@ -118,12 +123,12 @@ def parse_report(path: str) -> ParsedReport:
                 setattr(report, attr, val)
 
         for label, attr, cast in [
-            ("Total devices", "total_devices", int),
-            ("Known devices", "known_devices", int),
-            ("Flagged/Unknown", "flagged_count", int),
-            ("Foreign (new MAC)", "foreign_count", int),
-            ("Total packets", "total_packets", int),
-            ("Avg confidence", "avg_confidence", float),
+            ("Total devices",     "total_devices",  int),
+            ("Known devices",     "known_devices",   int),
+            ("Flagged/Unknown",   "flagged_count",   int),
+            ("Foreign (new MAC)", "foreign_count",   int),
+            ("Total packets",     "total_packets",   int),
+            ("Avg confidence",    "avg_confidence",  float),
         ]:
             val = _parse_summary_line(line, label)
             if val is not None:
@@ -132,13 +137,10 @@ def parse_report(path: str) -> ParsedReport:
                 except ValueError:
                     pass
 
-        if line.strip() == "--- All Devices ---" and i + 1 < len(lines):
+        if line.strip() == "--- All Devices ---":
             report.devices = _parse_table_rows(lines, i + 1)
-
-        if line.strip() == "--- Flagged Devices ---" and i + 1 < len(lines):
+        if line.strip() == "--- Flagged Devices ---":
             report.flagged = _parse_table_rows(lines, i + 1)
-
-        i += 1
 
     return report
 
@@ -147,64 +149,144 @@ def load_all_reports(reports_dir: str = "data/reports") -> List[ParsedReport]:
     data_path = Path(reports_dir)
     if not data_path.exists():
         return []
-    reports = sorted(data_path.glob("*.txt"), key=os.path.getctime, reverse=True)
-    return [parse_report(str(p)) for p in reports]
+    files = sorted(data_path.glob("*.txt"), key=os.path.getctime, reverse=True)
+    return [parse_report(str(f)) for f in files]
 
 
 # ---------------------------------------------------------------------------
-# TUI widgets
+# Device detail screen
 # ---------------------------------------------------------------------------
 
-def _fmt_conf(raw: str) -> str:
-    try:
-        return f"{float(raw):.2f}"
-    except ValueError:
-        return raw
+class DeviceDetailScreen(Screen):
+    """Full-screen detail view for a single device."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back")]
+
+    def __init__(self, device: DeviceRow) -> None:
+        super().__init__()
+        self.device = device
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(id="detail")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        d = self.device
+        t = Text()
+        t.append("Device Detail\n\n", style="bold")
+
+        def row(label: str, value: str, style: str = "") -> None:
+            t.append(f"  {label:<22}", style="dim")
+            t.append(value + "\n", style=style)
+
+        row("Name:",          d.device_name)
+        row("Type:",          d.device_type)
+        row("MAC Address:",   d.mac_address)
+
+        try:
+            conf_f = float(d.confidence)
+            conf_style = "bold green" if conf_f >= 0.6 else "bold yellow"
+            conf_str = f"{conf_f:.4f}"
+        except ValueError:
+            conf_style = ""
+            conf_str = d.confidence
+
+        row("Confidence:",    conf_str, conf_style)
+        row("Total Packets:", d.total_packets)
+
+        if d.foreign:
+            row("Status:", "FOREIGN — MAC not registered on this network", "bold red")
+        elif d.flagged:
+            row("Status:", "FLAGGED — low classification confidence", "yellow")
+        else:
+            row("Status:", "OK — classified with sufficient confidence", "bold green")
+
+        self.query_one("#detail", Static).update(
+            Panel(t, title=f"Device: {d.mac_address}", border_style="dim")
+        )
 
 
-class DashboardWidget(Static):
+# ---------------------------------------------------------------------------
+# Main dashboard
+# ---------------------------------------------------------------------------
 
-    def __init__(self, reports_dir: str = "data/reports", **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.reports_dir = reports_dir
+class DashboardApp(App):
+    """TUI dashboard for Device Identificationator."""
+
+    BINDINGS = [
+        ("n", "next_report",   "Next report"),
+        ("p", "prev_report",   "Prev report"),
+        ("j", "cursor_down",   "Device down"),
+        ("k", "cursor_up",     "Device up"),
+        ("d", "device_detail", "Detail"),
+        ("r", "refresh",       "Refresh"),
+        ("q", "quit",          "Quit"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
         self.all_reports: List[ParsedReport] = []
         self.active_idx: int = 0
+        self.selected_device_idx: int = 0
         self.status_message: str = "Ready"
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(id="dashboard")
+        yield Footer()
 
     def on_mount(self) -> None:
         self._reload()
+        self.set_interval(30, self._auto_refresh)
+
+    # --- Data ---------------------------------------------------------------
 
     def _reload(self) -> None:
-        self.all_reports = load_all_reports(self.reports_dir)
+        self.all_reports = load_all_reports()
         self.active_idx = 0
+        self.selected_device_idx = 0
         self.status_message = (
             f"Loaded {len(self.all_reports)} report(s)"
             if self.all_reports
             else "No reports found in data/reports/"
         )
-        self._render_view()
+        self._render()
 
-    def _render_view(self) -> None:
-        self.update(self._build())
+    def _auto_refresh(self) -> None:
+        self.all_reports = load_all_reports()
+        self.status_message = f"Auto-refreshed at {datetime.now().strftime('%H:%M:%S')}"
+        self._render()
 
-    # --- Layout -------------------------------------------------------------
+    def _active_report(self) -> Optional[ParsedReport]:
+        if not self.all_reports:
+            return None
+        return self.all_reports[self.active_idx]
 
-    def _build(self) -> Group:
-        return Group(self._build_header(), self._build_mid(), self._build_status())
+    # --- Rendering ----------------------------------------------------------
+
+    def _render(self) -> None:
+        self.query_one("#dashboard", Static).update(self._build_renderable())
+
+    def _build_renderable(self) -> Group:
+        return Group(
+            self._build_header(),
+            self._build_mid(),
+            self._build_status(),
+        )
 
     def _build_header(self) -> Panel:
         t = Text()
         t.append("Device Identificationator", style="bold")
         t.append("  ")
-        t.append("Network Dashboard", style="dim")
-        t.append("\n")
-        if self.all_reports:
-            r = self.all_reports[self.active_idx]
+        r = self._active_report()
+        if r:
             t.append("Network: ", style="dim")
-            t.append(r.network, style="bold cyan")
-            t.append(f"   File: {Path(r.raw_path).name}", style="dim")
+            t.append(r.network, style="bold")
+            t.append(f"  |  {Path(r.raw_path).name}", style="dim")
+            t.append(f"  |  Generated: {r.generated_at}", style="dim")
         else:
-            t.append("No report loaded", style="dim red")
+            t.append("No report loaded", style="dim")
         return Panel(t, title="Overview", border_style="dim")
 
     def _build_mid(self) -> Columns:
@@ -222,32 +304,33 @@ class DashboardWidget(Static):
     def _build_menu(self) -> Panel:
         t = Text()
         t.append("Keys\n", style="bold")
-        t.append("  n  Next report\n")
-        t.append("  p  Previous report\n")
-        t.append("  r  Refresh\n")
-        t.append("  q  Quit\n\n")
+        t.append("  n / p    Next / prev report\n")
+        t.append("  j / k    Move device cursor\n")
+        t.append("  d        Device detail\n")
+        t.append("  r        Refresh\n")
+        t.append("  q        Quit\n\n")
         t.append("Reports\n", style="bold")
         for idx, rep in enumerate(self.all_reports):
             marker = "▶ " if idx == self.active_idx else "  "
-            name = Path(rep.raw_path).name
-            style = "bold cyan" if idx == self.active_idx else "dim"
-            t.append(f"{marker}{name}\n", style=style)
+            style = "bold" if idx == self.active_idx else "dim"
+            t.append(f"{marker}{Path(rep.raw_path).name}\n", style=style)
+        if not self.all_reports:
+            t.append("  (none)\n", style="dim")
         return Panel(t, title="Menu", border_style="dim")
 
     def _build_summary(self) -> Panel:
         t = Text()
-        if not self.all_reports:
+        r = self._active_report()
+        if not r:
             t.append("No data available", style="dim")
             return Panel(t, title="Summary", border_style="dim")
 
-        r = self.all_reports[self.active_idx]
-
         def stat(label: str, value: str, style: str = "bold") -> None:
-            t.append(f"{label:<20}")
+            t.append(f"  {label:<22}")
             t.append(value + "\n", style=style)
 
-        stat("Total devices:", str(r.total_devices))
-        stat("Known devices:", str(r.known_devices), "bold green")
+        stat("Total devices:",     str(r.total_devices))
+        stat("Known devices:",     str(r.known_devices),  "bold green")
         stat(
             "Flagged/Unknown:",
             str(r.flagged_count),
@@ -258,14 +341,13 @@ class DashboardWidget(Static):
             str(r.foreign_count),
             "bold red" if r.foreign_count > 0 else "bold green",
         )
-        stat("Total packets:", str(r.total_packets))
+        stat("Total packets:",     str(r.total_packets))
         stat(
             "Avg confidence:",
             f"{r.avg_confidence:.4f}",
             "bold green" if r.avg_confidence >= 0.6 else "bold yellow",
         )
-        t.append("\nGenerated at:\n  ", style="dim")
-        t.append(r.generated_at, style="dim")
+        t.append("\n  Auto-refresh: every 30s", style="dim")
         return Panel(t, title="Summary", border_style="dim")
 
     # --- Centre column ------------------------------------------------------
@@ -274,44 +356,48 @@ class DashboardWidget(Static):
         return Group(self._build_device_table())
 
     def _build_device_table(self) -> Panel:
-        if not self.all_reports:
-            return Panel(
-                Text("No report loaded", style="dim"),
-                title="All Devices",
-                border_style="dim",
-            )
-
-        r = self.all_reports[self.active_idx]
-        table = Table(show_header=True, header_style="bold", expand=True)
-        table.add_column("Name", style="cyan", no_wrap=True)
+        r = self._active_report()
+        table = Table(show_header=True, header_style="bold")
+        table.add_column(" ",      width=2)
+        table.add_column("Name",   style="cyan")
         table.add_column("Type")
-        table.add_column("MAC", style="dim")
-        table.add_column("Conf", justify="right")
-        table.add_column("Pkts", justify="right")
+        table.add_column("MAC",    style="dim")
+        table.add_column("Conf",   justify="right")
+        table.add_column("Pkts",   justify="right")
+        table.add_column("Status", justify="center")
 
-        for dev in r.devices:
-            if dev.get("_foreign"):
-                row_style = "bold red"        # foreign — never-seen MAC
-            elif dev.get("_flagged"):
-                row_style = "yellow"          # known but low-confidence
+        if not r or not r.devices:
+            table.add_row("", "—", "—", "—", "—", "—", "—", style="dim")
+            return Panel(table, title="All Devices (0)", border_style="dim")
+
+        for idx, dev in enumerate(r.devices):
+            try:
+                conf_str = f"{float(dev.confidence):.2f}"
+            except ValueError:
+                conf_str = dev.confidence
+
+            if dev.foreign:
+                status, row_style = "FOREIGN", "bold red"
+            elif dev.flagged:
+                status, row_style = "FLAGGED", "yellow"
             else:
-                row_style = "green"           # classified and confident
+                status, row_style = "OK",      "green"
 
+            cursor = "▶" if idx == self.selected_device_idx else " "
             table.add_row(
-                dev.get("device_name", ""),
-                dev.get("device_type", ""),
-                dev.get("mac_address", ""),
-                _fmt_conf(dev.get("confidence", "0")),
-                dev.get("total_packets", ""),
+                cursor,
+                dev.device_name,
+                dev.device_type,
+                dev.mac_address,
+                conf_str,
+                dev.total_packets,
+                status,
                 style=row_style,
             )
 
-        if not r.devices:
-            table.add_row("—", "—", "—", "—", "—", style="dim")
-
         return Panel(
             table,
-            title=f"All Devices ({len(r.devices)})",
+            title=f"All Devices ({len(r.devices)})  —  j/k to move  d for detail",
             border_style="dim",
         )
 
@@ -321,111 +407,108 @@ class DashboardWidget(Static):
         return Group(self._build_flagged_panel(), self._build_activity())
 
     def _build_flagged_panel(self) -> Panel:
-        if not self.all_reports:
-            return Panel(Text("No data", style="dim"), title="Flagged Devices", border_style="dim")
-
-        r = self.all_reports[self.active_idx]
-
-        if not r.flagged:
+        r = self._active_report()
+        if not r or not r.flagged:
             t = Text()
-            t.append("✓ No flagged devices", style="green")
+            t.append(
+                "✓ No flagged devices" if r else "No data",
+                style="green" if r else "dim",
+            )
             return Panel(t, title="Flagged Devices", border_style="dim")
 
-        table = Table(show_header=True, header_style="bold red", expand=True)
+        table = Table(show_header=True, header_style="bold")
         table.add_column("Name")
-        table.add_column("Type")
-        table.add_column("Conf", justify="right")
+        table.add_column("MAC",    style="dim")
+        table.add_column("Conf",   justify="right")
         table.add_column("Reason")
 
         for dev in r.flagged:
-            if dev.get("_foreign"):
-                reason = "Foreign MAC"
-                row_style = "bold red"
+            if dev.foreign:
+                reason, row_style = "Foreign MAC",    "bold red"
             else:
-                reason = "Low confidence"
-                row_style = "yellow"
+                reason, row_style = "Low confidence", "yellow"
+            try:
+                conf_str = f"{float(dev.confidence):.2f}"
+            except ValueError:
+                conf_str = dev.confidence
 
             table.add_row(
-                dev.get("device_name", ""),
-                dev.get("device_type", ""),
-                _fmt_conf(dev.get("confidence", "0")),
+                dev.device_name,
+                dev.mac_address,
+                conf_str,
                 reason,
                 style=row_style,
             )
 
-        return Panel(
-            table,
-            title=f"⚠ Flagged ({len(r.flagged)})",
-            border_style="red",
-        )
+        return Panel(table, title=f"⚠ Flagged ({len(r.flagged)})", border_style="dim")
 
     def _build_activity(self) -> Panel:
         t = Text()
         t.append("[OK] Dashboard initialised\n")
-        t.append(f"[OK] {len(self.all_reports)} report(s) loaded\n")
-        if self.all_reports:
-            r = self.all_reports[self.active_idx]
-            t.append(f"[OK] Active: {Path(r.raw_path).name}\n")
+        t.append(f"[OK] {len(self.all_reports)} report(s) found\n")
+        r = self._active_report()
+        if r:
+            t.append(f"[OK] Viewing: {Path(r.raw_path).name}\n")
+            t.append(f"[OK] Network: {r.network}\n")
         t.append(f"[  ] {self.status_message}\n")
         return Panel(t, title="Activity", border_style="dim")
 
     # --- Status bar ---------------------------------------------------------
 
     def _build_status(self) -> Panel:
+        r = self._active_report()
         t = Text()
         t.append(f"Status: {self.status_message}  |  ")
-        if self.all_reports:
-            r = self.all_reports[self.active_idx]
-            t.append(f"Report {self.active_idx + 1}/{len(self.all_reports)}: ")
-            t.append(f"{r.network}  ", style="cyan")
+        if r:
+            t.append(
+                f"Report {self.active_idx + 1}/{len(self.all_reports)}  |  "
+                f"Device {self.selected_device_idx + 1}/{len(r.devices) or 1}  |  "
+            )
         t.append(datetime.now().strftime("%H:%M:%S"), style="dim")
         return Panel(t, title="Status", border_style="dim")
 
     # --- Actions ------------------------------------------------------------
 
-    def next_report(self) -> None:
+    def action_next_report(self) -> None:
         if self.all_reports:
             self.active_idx = (self.active_idx + 1) % len(self.all_reports)
+            self.selected_device_idx = 0
             self.status_message = f"Viewing: {Path(self.all_reports[self.active_idx].raw_path).name}"
-        self._render_view()
-
-    def prev_report(self) -> None:
-        if self.all_reports:
-            self.active_idx = (self.active_idx - 1) % len(self.all_reports)
-            self.status_message = f"Viewing: {Path(self.all_reports[self.active_idx].raw_path).name}"
-        self._render_view()
-
-    def refresh_reports(self) -> None:
-        self._reload()
-        self.status_message = "Refreshed"
-        self._render_view()
-
-
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
-
-class DashboardApp(App):
-    BINDINGS = [
-        ("n", "next_report", "Next report"),
-        ("p", "prev_report", "Prev report"),
-        ("r", "refresh", "Refresh"),
-        ("q", "quit", "Quit"),
-    ]
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield DashboardWidget(id="dashboard")
-        yield Footer()
-
-    def action_next_report(self) -> None:
-        self.query_one("#dashboard", DashboardWidget).next_report()
+        self._render()
 
     def action_prev_report(self) -> None:
-        self.query_one("#dashboard", DashboardWidget).prev_report()
+        if self.all_reports:
+            self.active_idx = (self.active_idx - 1) % len(self.all_reports)
+            self.selected_device_idx = 0
+            self.status_message = f"Viewing: {Path(self.all_reports[self.active_idx].raw_path).name}"
+        self._render()
+
+    def action_cursor_down(self) -> None:
+        r = self._active_report()
+        if r and r.devices:
+            self.selected_device_idx = min(
+                self.selected_device_idx + 1, len(r.devices) - 1
+            )
+            self.status_message = f"Device {self.selected_device_idx + 1}/{len(r.devices)}"
+            self._render()
+
+    def action_cursor_up(self) -> None:
+        r = self._active_report()
+        if r and r.devices:
+            self.selected_device_idx = max(self.selected_device_idx - 1, 0)
+            self.status_message = f"Device {self.selected_device_idx + 1}/{len(r.devices)}"
+            self._render()
+
+    def action_device_detail(self) -> None:
+        r = self._active_report()
+        if r and r.devices:
+            self.push_screen(DeviceDetailScreen(r.devices[self.selected_device_idx]))
+        else:
+            self.status_message = "No device selected"
+            self._render()
 
     def action_refresh(self) -> None:
-        self.query_one("#dashboard", DashboardWidget).refresh_reports()
+        self._reload()
 
 
 if __name__ == "__main__":
