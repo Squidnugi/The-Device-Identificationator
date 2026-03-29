@@ -7,7 +7,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from rich.columns import Columns
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
@@ -24,17 +23,20 @@ from textual.widgets import Footer, Header, Static
 
 @dataclass
 class DeviceRow:
+    """Represents a single device row from the report."""
     device_name: str
     device_type: str
     mac_address: str
     confidence: str
     total_packets: str
+    source_ips: str = "N/A"
     flagged: bool = False
     foreign: bool = False
 
 
 @dataclass
 class ParsedReport:
+    """Represents a parsed report."""
     generated_at: str = "N/A"
     network: str = "N/A"
     source_file: str = "N/A"
@@ -50,11 +52,13 @@ class ParsedReport:
 
 
 def _parse_summary_line(line: str, key: str) -> Optional[str]:
+    """Parse a summary line of the form 'Key: Value' and return the value if the key matches."""
     match = re.match(rf"^{re.escape(key)}\s*:\s*(.+)$", line.strip())
     return match.group(1).strip() if match else None
 
 
 def _parse_table_rows(lines: List[str], start_idx: int) -> List[DeviceRow]:
+    """Parse table rows starting from the given index. Expects a header line, a separator line, then data rows."""
     rows = []
     if start_idx + 1 >= len(lines):
         return rows
@@ -87,17 +91,20 @@ def _parse_table_rows(lines: List[str], start_idx: int) -> List[DeviceRow]:
         foreign = stripped.endswith("[FOREIGN]")
         flagged = stripped.endswith("[FLAGGED]") or foreign
         clean = re.sub(r"\s*\[(FLAGGED|FOREIGN)\]$", "", stripped)
-        values = [
-            clean[s:e].strip() if e <= len(clean) else clean[s:].strip()
-            for s, e in col_spans
-        ]
-        d = dict(zip(headers, values))
+        d = {}
+        for idx, (s, e) in enumerate(col_spans):
+            header = headers[idx]
+            if header == "source_ips":
+                d[header] = clean[s:].strip()
+            else:
+                d[header] = clean[s:e].strip() if e <= len(clean) else clean[s:].strip()
         rows.append(DeviceRow(
             device_name=d.get("device_name", ""),
             device_type=d.get("device_type", ""),
             mac_address=d.get("mac_address", ""),
             confidence=d.get("confidence", "0.0"),
             total_packets=d.get("total_packets", "0"),
+            source_ips=d.get("source_ips", "N/A"),
             flagged=flagged,
             foreign=foreign,
         ))
@@ -105,12 +112,36 @@ def _parse_table_rows(lines: List[str], start_idx: int) -> List[DeviceRow]:
     return rows
 
 
+def _parse_source_ip_rows(lines: List[str], start_idx: int) -> dict[str, str]:
+    """Parse source IP rows of the form 'MAC: ... | Device: ... | Source IPs: ...'."""
+    source_ip_by_mac: dict[str, str] = {}
+    row_re = re.compile(
+        r"^MAC:\s*(.+?)\s*\|\s*Device:\s*(.*?)\s*\|\s*Source IPs:\s*(.*)$"
+    )
+
+    for row_line in lines[start_idx:]:
+        stripped = row_line.strip()
+        if not stripped or stripped.startswith("---"):
+            break
+        match = row_re.match(stripped)
+        if not match:
+            continue
+        mac = match.group(1).strip().lower()
+        source_ips = match.group(3).strip() or "N/A"
+        source_ip_by_mac[mac] = source_ips
+
+    return source_ip_by_mac
+
+
 def parse_report(path: str) -> ParsedReport:
+    """Parse a report file and return a ParsedReport object."""
     report = ParsedReport(raw_path=path)
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except Exception:
         return report
+
+    source_ip_by_mac: dict[str, str] = {}
 
     for i, line in enumerate(lines):
         for label, attr in [
@@ -141,11 +172,20 @@ def parse_report(path: str) -> ParsedReport:
             report.devices = _parse_table_rows(lines, i + 1)
         if line.strip() == "--- Flagged Devices ---":
             report.flagged = _parse_table_rows(lines, i + 1)
+        if line.strip() in {"--- All Device Source IPs ---", "--- Flagged Device Source IPs ---"}:
+            source_ip_by_mac.update(_parse_source_ip_rows(lines, i + 1))
+
+    if source_ip_by_mac:
+        for dev in report.devices:
+            dev.source_ips = source_ip_by_mac.get(dev.mac_address.lower(), "N/A")
+        for dev in report.flagged:
+            dev.source_ips = source_ip_by_mac.get(dev.mac_address.lower(), "N/A")
 
     return report
 
 
 def load_all_reports(reports_dir: str = "data/reports") -> List[ParsedReport]:
+    """Load and parse all report files from the given directory, sorted by creation time (newest first)."""
     data_path = Path(reports_dir)
     if not data_path.exists():
         return []
@@ -167,11 +207,13 @@ class DeviceDetailScreen(Screen):
         self.device = device
 
     def compose(self) -> ComposeResult:
+        """Compose the layout for the device detail screen."""
         yield Header(show_clock=True)
         yield Static(id="detail")
         yield Footer()
 
     def on_mount(self) -> None:
+        """Render the device details when the screen is mounted."""
         d = self.device
         t = Text()
         t.append("Device Detail\n\n", style="bold")
@@ -194,6 +236,7 @@ class DeviceDetailScreen(Screen):
 
         row("Confidence:",    conf_str, conf_style)
         row("Total Packets:", d.total_packets)
+        row("Source IPs:",    d.source_ips)
 
         if d.foreign:
             row("Status:", "FOREIGN — MAC not registered on this network", "bold red")
@@ -211,38 +254,39 @@ class DeviceDetailScreen(Screen):
 # Main dashboard
 # ---------------------------------------------------------------------------
 
-class DashboardApp(App):
-    """TUI dashboard for Device Identificationator."""
+_DASHBOARD_NAV_BINDINGS = [
+    ("n", "next_report",   "Next report"),
+    ("p", "prev_report",   "Prev report"),
+    ("right", "next_report", "Next report"),
+    ("left", "prev_report",  "Prev report"),
+    ("j", "cursor_down",   "Device down"),
+    ("k", "cursor_up",     "Device up"),
+    ("down", "cursor_down", "Device down"),
+    ("up", "cursor_up",     "Device up"),
+    ("d", "device_detail", "Detail"),
+    ("r", "refresh",       "Refresh"),
+]
 
-    BINDINGS = [
-        ("n", "next_report",   "Next report"),
-        ("p", "prev_report",   "Prev report"),
-        ("j", "cursor_down",   "Device down"),
-        ("k", "cursor_up",     "Device up"),
-        ("d", "device_detail", "Detail"),
-        ("r", "refresh",       "Refresh"),
-        ("q", "quit",          "Quit"),
-    ]
 
-    def __init__(self) -> None:
-        super().__init__()
+class DashboardMixin:
+    """Shared dashboard behavior used by both standalone App and embedded Screen."""
+
+    def _init_dashboard_state(self) -> None:
         self.all_reports: List[ParsedReport] = []
         self.active_idx: int = 0
         self.selected_device_idx: int = 0
         self.status_message: str = "Ready"
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield Static(id="dashboard")
-        yield Footer()
-
-    def on_mount(self) -> None:
+    def _on_dashboard_mount(self) -> None:
+        """Load reports and start auto-refresh timer."""
+        # Render immediately once mounted.
         self._reload()
         self.set_interval(30, self._auto_refresh)
 
     # --- Data ---------------------------------------------------------------
 
     def _reload(self) -> None:
+        """Reload all reports from disk and reset state."""
         self.all_reports = load_all_reports()
         self.active_idx = 0
         self.selected_device_idx = 0
@@ -251,31 +295,45 @@ class DashboardApp(App):
             if self.all_reports
             else "No reports found in data/reports/"
         )
-        self._render()
+        self._refresh_dashboard()
 
     def _auto_refresh(self) -> None:
+        """Auto-refresh reports from disk without changing the current selection."""
         self.all_reports = load_all_reports()
         self.status_message = f"Auto-refreshed at {datetime.now().strftime('%H:%M:%S')}"
-        self._render()
+        self._refresh_dashboard()
 
     def _active_report(self) -> Optional[ParsedReport]:
+        """Get the currently active report, or None if no reports are loaded."""
         if not self.all_reports:
             return None
         return self.all_reports[self.active_idx]
 
     # --- Rendering ----------------------------------------------------------
 
-    def _render(self) -> None:
-        self.query_one("#dashboard", Static).update(self._build_renderable())
+    def _refresh_dashboard(self) -> None:
+        """Re-render the entire dashboard based on the current state."""
+        try:
+            self.query_one("#dashboard", Static).update(self._build_renderable())
+        except Exception as exc:
+            fallback = Text()
+            fallback.append("Dashboard render error\n", style="bold red")
+            fallback.append(str(exc), style="yellow")
+            self.query_one("#dashboard", Static).update(Panel(fallback, title="Dashboard", border_style="red"))
 
     def _build_renderable(self) -> Group:
+        """Build the main renderable Group containing all dashboard components."""
+        header = self._build_header() or Panel("Header unavailable", border_style="red")
+        middle = self._build_mid() or Panel("Body unavailable", border_style="red")
+        status = self._build_status() or Panel("Status unavailable", border_style="red")
         return Group(
-            self._build_header(),
-            self._build_mid(),
-            self._build_status(),
+            header,
+            middle,
+            status,
         )
 
     def _build_header(self) -> Panel:
+        """Build the header panel showing the current report and network."""
         t = Text()
         t.append("Device Identificationator", style="bold")
         t.append("  ")
@@ -289,23 +347,40 @@ class DashboardApp(App):
             t.append("No report loaded", style="dim")
         return Panel(t, title="Overview", border_style="dim")
 
-    def _build_mid(self) -> Columns:
-        return Columns(
-            [self._build_left(), self._build_centre(), self._build_right()],
-            equal=True,
-            expand=True,
-        )
+    def _build_mid(self) -> Group:
+        """Build the middle section with devices and flagged panels on the right."""
+        left = self._build_left() or Panel("Left unavailable", border_style="red")
+        centre = self._build_centre() or Panel("Center unavailable", border_style="red")
+        activity = self._build_activity() or Panel("Activity unavailable", border_style="red")
+        flagged = self._build_flagged_panel() or Panel("Flagged unavailable", border_style="red")
+
+        # Keep controls and activity on the left.
+        left_column = Group(left, activity)
+
+        # Put device table on the right, with flagged directly beneath it.
+        right_column = Group(centre, flagged)
+
+        layout_table = Table.grid(expand=True, padding=1)
+        layout_table.add_column(ratio=1)
+        layout_table.add_column(ratio=2)
+        layout_table.add_row(left_column, right_column)
+
+        return Group(layout_table)
 
     # --- Left column --------------------------------------------------------
 
     def _build_left(self) -> Group:
+        """Build the left column containing the menu and summary panels."""
         return Group(self._build_menu(), self._build_summary())
 
     def _build_menu(self) -> Panel:
+        """Build the menu panel showing key bindings and available reports."""
         t = Text()
         t.append("Keys\n", style="bold")
         t.append("  n / p    Next / prev report\n")
+        t.append("  ← / →    Next / prev report\n")
         t.append("  j / k    Move device cursor\n")
+        t.append("  ↑ / ↓    Move device cursor\n")
         t.append("  d        Device detail\n")
         t.append("  r        Refresh\n")
         t.append("  q        Quit\n\n")
@@ -319,6 +394,7 @@ class DashboardApp(App):
         return Panel(t, title="Menu", border_style="dim")
 
     def _build_summary(self) -> Panel:
+        """Build the summary panel showing key statistics about the current report."""
         t = Text()
         r = self._active_report()
         if not r:
@@ -326,6 +402,7 @@ class DashboardApp(App):
             return Panel(t, title="Summary", border_style="dim")
 
         def stat(label: str, value: str, style: str = "bold") -> None:
+            """Helper to add a summary statistic line."""
             t.append(f"  {label:<22}")
             t.append(value + "\n", style=style)
 
@@ -353,9 +430,11 @@ class DashboardApp(App):
     # --- Centre column ------------------------------------------------------
 
     def _build_centre(self) -> Group:
+        """Build the centre column containing the main device table."""
         return Group(self._build_device_table())
 
     def _build_device_table(self) -> Panel:
+        """Build the main device table panel showing all devices in the current report."""
         r = self._active_report()
         table = Table(show_header=True, header_style="bold")
         table.add_column(" ",      width=2)
@@ -377,13 +456,15 @@ class DashboardApp(App):
                 conf_str = dev.confidence
 
             if dev.foreign:
-                status, row_style = "FOREIGN", "bold red"
+                status, base_style = "FOREIGN", "bold red"
             elif dev.flagged:
-                status, row_style = "FLAGGED", "yellow"
+                status, base_style = "FLAGGED", "yellow"
             else:
-                status, row_style = "OK",      "green"
+                status, base_style = "OK",      "green"
 
-            cursor = "▶" if idx == self.selected_device_idx else " "
+            is_selected = idx == self.selected_device_idx
+            cursor = ">" if is_selected else " "
+            row_style = f"{base_style} reverse" if is_selected else base_style
             table.add_row(
                 cursor,
                 dev.device_name,
@@ -404,9 +485,11 @@ class DashboardApp(App):
     # --- Right column -------------------------------------------------------
 
     def _build_right(self) -> Group:
+        """Build the right column containing the flagged devices panel and activity log."""
         return Group(self._build_flagged_panel(), self._build_activity())
 
     def _build_flagged_panel(self) -> Panel:
+        """Build the flagged devices panel showing any devices that are flagged or foreign."""
         r = self._active_report()
         if not r or not r.flagged:
             t = Text()
@@ -443,6 +526,7 @@ class DashboardApp(App):
         return Panel(table, title=f"⚠ Flagged ({len(r.flagged)})", border_style="dim")
 
     def _build_activity(self) -> Panel:
+        """Build the activity panel showing recent actions and status messages."""
         t = Text()
         t.append("[OK] Dashboard initialised\n")
         t.append(f"[OK] {len(self.all_reports)} report(s) found\n")
@@ -456,6 +540,7 @@ class DashboardApp(App):
     # --- Status bar ---------------------------------------------------------
 
     def _build_status(self) -> Panel:
+        """Build the status bar showing current status and timestamp."""
         r = self._active_report()
         t = Text()
         t.append(f"Status: {self.status_message}  |  ")
@@ -470,45 +555,91 @@ class DashboardApp(App):
     # --- Actions ------------------------------------------------------------
 
     def action_next_report(self) -> None:
+        """Switch to the next report in the list."""
         if self.all_reports:
             self.active_idx = (self.active_idx + 1) % len(self.all_reports)
             self.selected_device_idx = 0
             self.status_message = f"Viewing: {Path(self.all_reports[self.active_idx].raw_path).name}"
-        self._render()
+        self._refresh_dashboard()
 
     def action_prev_report(self) -> None:
+        """Switch to the previous report in the list."""
         if self.all_reports:
             self.active_idx = (self.active_idx - 1) % len(self.all_reports)
             self.selected_device_idx = 0
             self.status_message = f"Viewing: {Path(self.all_reports[self.active_idx].raw_path).name}"
-        self._render()
+        self._refresh_dashboard()
 
     def action_cursor_down(self) -> None:
+        """Move the device selection cursor down in the current report's device list."""
         r = self._active_report()
         if r and r.devices:
             self.selected_device_idx = min(
                 self.selected_device_idx + 1, len(r.devices) - 1
             )
             self.status_message = f"Device {self.selected_device_idx + 1}/{len(r.devices)}"
-            self._render()
+            self._refresh_dashboard()
 
     def action_cursor_up(self) -> None:
+        """Move the device selection cursor up in the current report's device list."""
         r = self._active_report()
         if r and r.devices:
             self.selected_device_idx = max(self.selected_device_idx - 1, 0)
             self.status_message = f"Device {self.selected_device_idx + 1}/{len(r.devices)}"
-            self._render()
+            self._refresh_dashboard()
 
     def action_device_detail(self) -> None:
+        """Open the device detail screen for the currently selected device."""
         r = self._active_report()
         if r and r.devices:
-            self.push_screen(DeviceDetailScreen(r.devices[self.selected_device_idx]))
+            self.app.push_screen(DeviceDetailScreen(r.devices[self.selected_device_idx]))
         else:
             self.status_message = "No device selected"
-            self._render()
+            self._refresh_dashboard()
 
     def action_refresh(self) -> None:
+        """Manually refresh the reports from disk."""
         self._reload()
+
+
+class DashboardScreen(DashboardMixin, Screen):
+    """Embeddable dashboard screen for the main TUI app."""
+
+    BINDINGS = _DASHBOARD_NAV_BINDINGS + [
+        ("escape", "app.pop_screen", "Back"),
+        ("q", "app.pop_screen", "Back"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._init_dashboard_state()
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(id="dashboard", expand=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._on_dashboard_mount()
+
+
+class DashboardApp(DashboardMixin, App):
+    """Standalone dashboard app used by the CLI dashboard command."""
+
+    BINDINGS = _DASHBOARD_NAV_BINDINGS + [("q", "quit", "Quit")]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._init_dashboard_state()
+
+    def compose(self) -> ComposeResult:
+        """Compose the main dashboard layout."""
+        yield Header(show_clock=True)
+        yield Static(id="dashboard", expand=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._on_dashboard_mount()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,473 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+from typing import List
+
+from rich.console import Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from textual.app import App as TextualApp, ComposeResult
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Header, Input, Static
+
+if __package__ in (None, ""):
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from src.datapipeline import add_device, add_to_network, all_networks, get_devices_by_network
+    from src.models import use_model
+    from src.report import generate_report
+    from src.tui.dashboard import DashboardScreen
+else:
+    from ..datapipeline import add_device, add_to_network, all_networks, get_devices_by_network
+    from ..models import use_model
+    from ..report import generate_report
+    from .dashboard import DashboardScreen
+
+
+NETWORK_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "network.txt"
+CREATE_NETWORK_OPTION = "+ Create new network..."
+DEFAULT_CLASSIFICATION_FILE = "data/processed/16-09-24_extracted.csv"
+DEFAULT_REPORT_INPUT = "data/processed/16-09-24_extracted.csv"
+DEFAULT_REPORT_OUTPUT = "data/reports/report.txt"
+STATUS_STEP_DELAY_SECONDS = 0.15
+
+
+class CreateNetworkScreen(ModalScreen[str | None]):
+    """Prompt for creating a new network from the selector."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("Enter a new network name and press Enter:", id="new-network-label")
+        yield Input(placeholder="Network name", id="new-network-input")
+        yield Static("Esc to cancel", id="new-network-help")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#new-network-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "new-network-input":
+            return
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class App(TextualApp):
+    """Main application class for the TUI."""
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("c", "start_classification", "Start Classification"),
+        ("r", "generate_report", "Generate Report"),
+        ("d", "dashboard", "View Dashboard"),
+        ("[", "network_prev", "Prev Network"),
+        ("]", "network_next", "Next Network"),
+        ("enter", "network_apply", "Apply Network"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.network_options: List[str] = []
+        self.network_cursor_idx: int = 0
+        self.current_network: str = "Not set"
+        self.status_message: str = "Ready"
+        self.current_devices: List = []
+        self.operation_steps: List[str] = []
+
+    def _add_operation_step(self, message: str) -> None:
+        """Record operation progress messages and keep only recent entries."""
+        self.operation_steps.append(message)
+        self.operation_steps = self.operation_steps[-10:]
+
+    async def _set_operation_status(self, status: str, step: str | None = None) -> None:
+        """Update status UI and yield to the event loop so changes render immediately."""
+        if step:
+            self._add_operation_step(step)
+        self.status_message = status
+        self._render_welcome()
+        await asyncio.sleep(STATUS_STEP_DELAY_SECONDS)
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Footer()
+        yield Static(id="welcome")
+
+    def on_mount(self) -> None:
+        self.current_network = self._load_current_network()
+        self._load_network_options()
+        self._load_devices_for_network()
+        self._render_welcome()
+
+    def _load_current_network(self) -> str:
+        """Load the currently configured network from config/network.txt."""
+        try:
+            value = NETWORK_CONFIG_PATH.read_text(encoding="utf-8").strip()
+            return value or "Not set"
+        except FileNotFoundError:
+            return "Not set"
+
+    def _save_current_network(self, network_name: str) -> None:
+        """Persist the selected network to config/network.txt."""
+        NETWORK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        NETWORK_CONFIG_PATH.write_text(network_name, encoding="utf-8")
+
+    def _load_network_options(self) -> None:
+        """Load all known network names and align the cursor to the current network."""
+        names: List[str] = []
+        try:
+            names = [n.network_name for n in all_networks() if getattr(n, "network_name", None)]
+        except Exception:
+            names = []
+
+        if self.current_network != "Not set" and self.current_network not in names:
+            names.append(self.current_network)
+
+        self.network_options = sorted({name for name in names if name != CREATE_NETWORK_OPTION}, key=str.lower)
+        if not self.network_options:
+            self.network_options = ["Not set"]
+
+        self.network_options.append(CREATE_NETWORK_OPTION)
+
+        if self.current_network in self.network_options:
+            self.network_cursor_idx = self.network_options.index(self.current_network)
+        else:
+            self.network_cursor_idx = 0
+
+    def _selected_network(self) -> str:
+        """Return the currently highlighted network option."""
+        if not self.network_options:
+            return "Not set"
+        return self.network_options[self.network_cursor_idx]
+
+    def _load_devices_for_network(self) -> None:
+        """Load all devices for the current network."""
+        self.current_devices = []
+        if self.current_network and self.current_network != "Not set":
+            try:
+                self.current_devices = get_devices_by_network(self.current_network)
+            except Exception:
+                self.current_devices = []
+
+    def _build_devices_panel(self) -> Panel:
+        """Build a panel showing all devices in the current network."""
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Device Name", style="cyan")
+        table.add_column("MAC Address", style="dim")
+        table.add_column("IP Address", style="dim")
+        table.add_column("Confidence")
+
+        if not self.current_devices:
+            table.add_row("—", "—", "—", "—", style="dim")
+        else:
+            for device in self.current_devices:
+                try:
+                    conf_str = f"{float(device.confidence):.2f}" if device.confidence else "N/A"
+                except (ValueError, TypeError):
+                    conf_str = str(device.confidence)
+
+                table.add_row(
+                    device.device_name or "—",
+                    device.mac_address or "—",
+                    device.ip_address or "—",
+                    conf_str,
+                )
+
+        return Panel(
+            table,
+            title=f"Devices ({len(self.current_devices)})",
+            border_style="blue",
+        )
+
+    def _render_welcome(self) -> None:
+        """Render the app home screen with network selector state."""
+        network_text = Text()
+        network_text.append("Current network: ", style="dim")
+        network_text.append(f"{self.current_network}\n", style="bold")
+        network_text.append("Selected network: ", style="dim")
+        network_text.append(f"{self._selected_network()}\n\n", style="bold")
+        network_text.append("Available networks:\n", style="dim")
+        for idx, name in enumerate(self.network_options):
+            marker = ">" if idx == self.network_cursor_idx else " "
+            suffix = " (current)" if name == self.current_network else ""
+            if name == CREATE_NETWORK_OPTION:
+                suffix = ""
+                style = "bold green" if idx == self.network_cursor_idx else "green"
+            else:
+                style = "bold" if idx == self.network_cursor_idx else ""
+            network_text.append(f" {marker} {name}{suffix}\n", style=style)
+
+        controls_text = Text(
+            "[      Select previous network\n"
+            "]      Select next network\n"
+            "Enter  Apply selected network\n"
+            "       (or create one from bottom option)\n"
+            "c      Start classification\n"
+            "d      Open dashboard\n"
+            "r      Generate report\n"
+            "q      Quit"
+        )
+
+        status_text = Text()
+        status_text.append("Current: ", style="dim")
+        status_text.append(self.status_message + "\n", style="bold")
+        status_text.append("Recent operation steps:\n", style="dim")
+        if self.operation_steps:
+            for step in self.operation_steps:
+                status_text.append(f"  - {step}\n")
+        else:
+            status_text.append("  - No report/classification action run yet\n", style="dim")
+
+        left_column = Group(
+            Panel(
+                network_text,
+                title="Network",
+                border_style="cyan",
+                subtitle="Use [ / ] and Enter",
+            ),
+            Panel(
+                controls_text,
+                title="Controls",
+                border_style="green",
+            ),
+        )
+
+        layout_table = Table.grid(padding=1)
+        layout_table.add_row(left_column, self._build_devices_panel())
+
+        renderable = Group(
+            layout_table,
+            Panel(
+                status_text,
+                title="App Status",
+                border_style="magenta",
+            ),
+        )
+        self.query_one("#welcome", Static).update(renderable)
+
+    async def action_generate_report(self) -> None:
+        """Generate a report from traffic data with visible step-by-step progress."""
+        self.operation_steps = []
+        await self._set_operation_status(
+            "Report in progress (1/5): validating configured network",
+            "Report 1/5: Validating configured network",
+        )
+
+        if self.current_network == "Not set":
+            await self._set_operation_status(
+                "Select a network before generating a report",
+                "Stopped: no network selected",
+            )
+            return
+
+        source_file = DEFAULT_REPORT_INPUT
+        await self._set_operation_status(
+            "Report in progress (2/5): checking source file",
+            f"Report 2/5: Checking source file ({source_file})",
+        )
+
+        if not Path(source_file).exists():
+            await self._set_operation_status(
+                f"Report source file not found: {source_file}",
+                "Stopped: source file not found",
+            )
+            return
+
+        try:
+            await self._set_operation_status(
+                "Report in progress (3/5): generating report",
+                "Report 3/5: Running report pipeline",
+            )
+
+            report_df = await asyncio.to_thread(
+                generate_report,
+                source_file,
+                DEFAULT_REPORT_OUTPUT,
+                self.current_network,
+            )
+            if report_df is None:
+                await self._set_operation_status(
+                    "Report generation returned no output",
+                    "Stopped: report pipeline returned no output",
+                )
+                return
+
+            await self._set_operation_status(
+                "Report in progress (4/5): resolving saved file",
+                "Report 4/5: Resolving saved report file",
+            )
+
+            saved_report = str(report_df.attrs.get("report_file", DEFAULT_REPORT_OUTPUT))
+
+            await self._set_operation_status(
+                f"Report generated: {Path(saved_report).name}",
+                "Report 5/5: Finalizing",
+            )
+            self._add_operation_step(f"Complete: report saved to {saved_report}")
+        except Exception as exc:
+            await self._set_operation_status(
+                f"Report generation failed: {exc}",
+                f"Failed: {exc}",
+            )
+
+        self._render_welcome()
+
+    async def action_start_classification(self) -> None:
+        """Run classification and save predictions with visible step-by-step progress."""
+        self.operation_steps = []
+        await self._set_operation_status(
+            "Classification in progress (1/6): validating selected network",
+            "Classification 1/6: Validating selected network",
+        )
+
+        if self.current_network == "Not set":
+            await self._set_operation_status(
+                "Select a network before starting classification",
+                "Stopped: no network selected",
+            )
+            return
+
+        await self._set_operation_status(
+            "Classification in progress (2/6): checking dataset file",
+            f"Classification 2/6: Checking dataset file ({DEFAULT_CLASSIFICATION_FILE})",
+        )
+
+        if not Path(DEFAULT_CLASSIFICATION_FILE).exists():
+            await self._set_operation_status(
+                f"Dataset not found: {DEFAULT_CLASSIFICATION_FILE}",
+                "Stopped: dataset file not found",
+            )
+            return
+
+        try:
+            await self._set_operation_status(
+                "Classification in progress (3/6): ensuring network exists",
+                "Classification 3/6: Ensuring network exists in database",
+            )
+            await asyncio.to_thread(add_to_network, self.current_network)
+
+            await self._set_operation_status(
+                "Classification in progress (4/6): running model inference",
+                "Classification 4/6: Running model inference",
+            )
+
+            results = await asyncio.to_thread(use_model, file_path=DEFAULT_CLASSIFICATION_FILE)
+
+            await self._set_operation_status(
+                "Classification in progress (5/6): writing predictions",
+                "Classification 5/6: Writing predictions to database",
+            )
+
+            save_stats = await asyncio.to_thread(add_device, results, self.current_network)
+
+            await self._set_operation_status(
+                "Classification in progress (6/6): refreshing device view",
+                "Classification 6/6: Refreshing device list",
+            )
+
+            await asyncio.to_thread(self._load_devices_for_network)
+            self.status_message = (
+                f"Classification complete: {len(results)} predictions processed for {self.current_network}"
+            )
+            self._add_operation_step(
+                "Complete: "
+                f"inserted={save_stats.get('inserted', 0)}, "
+                f"updated={save_stats.get('updated', 0)}, "
+                f"skipped={save_stats.get('skipped', 0)}"
+            )
+        except Exception as exc:
+            await self._set_operation_status(
+                f"Classification failed: {exc}",
+                f"Failed: {exc}",
+            )
+
+        self._render_welcome()
+
+    def action_dashboard(self) -> None:
+        self.push_screen(DashboardScreen())
+
+    def action_network_next(self) -> None:
+        """Move network selector to the next available network."""
+        if not self.network_options:
+            self.status_message = "No network options available"
+            self._render_welcome()
+            return
+        self.network_cursor_idx = (self.network_cursor_idx + 1) % len(self.network_options)
+        self.status_message = f"Selected network: {self._selected_network()}"
+        self._render_welcome()
+
+    def action_network_prev(self) -> None:
+        """Move network selector to the previous available network."""
+        if not self.network_options:
+            self.status_message = "No network options available"
+            self._render_welcome()
+            return
+        self.network_cursor_idx = (self.network_cursor_idx - 1) % len(self.network_options)
+        self.status_message = f"Selected network: {self._selected_network()}"
+        self._render_welcome()
+
+    def action_network_apply(self) -> None:
+        """Apply selected network as the current configured network."""
+        selected = self._selected_network()
+        if selected == CREATE_NETWORK_OPTION:
+            self.push_screen(CreateNetworkScreen(), self._handle_create_network_result)
+            return
+
+        if selected == "Not set":
+            self.status_message = "Pick a valid network before applying"
+            self._render_welcome()
+            return
+
+        try:
+            add_to_network(selected)
+            self._save_current_network(selected)
+            self.current_network = selected
+            self._load_network_options()
+            self._load_devices_for_network()
+            self.status_message = f"Current network changed to: {selected}"
+        except Exception as exc:
+            self.status_message = f"Failed to change network: {exc}"
+        self._render_welcome()
+
+    def _handle_create_network_result(self, result: str | None) -> None:
+        """Handle the value returned from the create-network prompt."""
+        if result is None:
+            self.status_message = "Create network canceled"
+            self._render_welcome()
+            return
+
+        new_name = result.strip()
+        if not new_name:
+            self.status_message = "Network name cannot be empty"
+            self._render_welcome()
+            return
+
+        if new_name == CREATE_NETWORK_OPTION:
+            self.status_message = "Choose a different network name"
+            self._render_welcome()
+            return
+
+        try:
+            add_to_network(new_name)
+            self._save_current_network(new_name)
+            self.current_network = new_name
+            self._load_network_options()
+            self._load_devices_for_network()
+            self.status_message = f"Created and switched to network: {new_name}"
+        except Exception as exc:
+            self.status_message = f"Failed to create network: {exc}"
+        self._render_welcome()
+
+
+
+
+if __name__ == "__main__":
+    App().run()

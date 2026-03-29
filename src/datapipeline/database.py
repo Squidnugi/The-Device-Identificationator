@@ -1,7 +1,7 @@
 """
 SQLAlchemy Database Configuration and Models for SQLite
 """
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.exc import IntegrityError
 
@@ -35,6 +35,7 @@ def get_db():
 def create_all_tables():
     """Create all tables in the database"""
     Base.metadata.create_all(bind=engine)
+    _migrate_devices_to_network_scoped_mac_uniqueness()
 
 
 def drop_all_tables():
@@ -46,6 +47,56 @@ def reset_database():
     """Reset the database by dropping and recreating all tables (WARNING: destructive)"""
     drop_all_tables()
     create_all_tables()
+
+
+def _migrate_devices_to_network_scoped_mac_uniqueness():
+    """Migrate legacy devices uniqueness from mac_address -> (mac_address, Network_id)."""
+    try:
+        with engine.connect() as conn:
+            table_info = conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'"
+            ).fetchone()
+            if not table_info or not table_info[0]:
+                return
+
+            create_sql = table_info[0]
+            has_legacy_unique = "UNIQUE (mac_address)" in create_sql
+            already_network_scoped = "UNIQUE (mac_address, Network_id)" in create_sql
+
+            if not has_legacy_unique or already_network_scoped:
+                return
+
+        with engine.begin() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE devices_new (
+                    id INTEGER NOT NULL,
+                    device_name VARCHAR NOT NULL,
+                    device_type VARCHAR NOT NULL,
+                    mac_address VARCHAR NOT NULL,
+                    ip_address VARCHAR,
+                    confidence FLOAT,
+                    Network_id INTEGER NOT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE (mac_address, Network_id),
+                    FOREIGN KEY(Network_id) REFERENCES networks (id)
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO devices_new (id, device_name, device_type, mac_address, ip_address, confidence, Network_id)
+                SELECT id, device_name, device_type, mac_address, ip_address, confidence, Network_id FROM devices
+                """
+            )
+            conn.exec_driver_sql("DROP TABLE devices")
+            conn.exec_driver_sql("ALTER TABLE devices_new RENAME TO devices")
+            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_devices_id ON devices (id)")
+            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_devices_device_name ON devices (device_name)")
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+    except Exception as e:
+        print(f"Warning: devices table uniqueness migration skipped: {e}")
 
 def _add_model_instance(db, model_instance):
     """Add a SQLAlchemy model instance to the database."""
@@ -112,23 +163,52 @@ def add_to_network(network_name):
         return None, False
 
 def add_device(devices, network):
-    """Add a new device to the database"""
+    """Add or update devices for a network and return persistence stats."""
+    _migrate_devices_to_network_scoped_mac_uniqueness()
     db = SessionLocal()
-    network_id = network.id if isinstance(network, Network) else db.query(Network).filter_by(network_name=network).first().id
+    stats = {"inserted": 0, "updated": 0, "skipped": 0}
+
+    network_row = network if isinstance(network, Network) else db.query(Network).filter_by(network_name=network).first()
+    if network_row is None and isinstance(network, str):
+        network_row, _ = get_or_create(db, Network, network_name=network)
+    if network_row is None:
+        db.close()
+        raise ValueError("Network must exist before adding devices")
+
+    network_id = network_row.id
+
     for i in devices.to_dict(orient="records"):
+        mac = i.get('MAC_Address')
+        if not mac:
+            stats["skipped"] += 1
+            continue
+
         try:
-            device = Device(
-                device_name=i.get('Predicted_Device'),
-                device_type=i.get('Predicted_Device'),
-                mac_address=i.get('MAC_Address'),
-                ip_address=i.get('IP_Address'),
-                confidence=i.get('Confidence'),
-                Network_id=network_id
-            )
-            _add_model_instance(db, device)
+            existing = db.query(Device).filter_by(mac_address=mac, Network_id=network_id).first()
+            if existing:
+                existing.device_name = i.get('Predicted_Device') or existing.device_name
+                existing.device_type = i.get('Predicted_Device') or existing.device_type
+                existing.ip_address = i.get('IP_Address') or existing.ip_address
+                existing.confidence = i.get('Confidence')
+                db.commit()
+                stats["updated"] += 1
+            else:
+                device = Device(
+                    device_name=i.get('Predicted_Device') or 'Unknown',
+                    device_type=i.get('Predicted_Device') or 'Unknown',
+                    mac_address=mac,
+                    ip_address=i.get('IP_Address'),
+                    confidence=i.get('Confidence'),
+                    Network_id=network_id
+                )
+                _add_model_instance(db, device)
+                stats["inserted"] += 1
         except IntegrityError:
-            print(f"Device with MAC {i.get('MAC_Address')} already exists. Skipping.")
+            db.rollback()
+            stats["skipped"] += 1
+            print(f"Device with MAC {mac} could not be persisted. Skipping.")
     db.close()
+    return stats
 
 def get_devices_by_network(network_name):
     """Get all devices associated with a specific network"""
@@ -156,11 +236,14 @@ def all_networks():
 class Device(Base):
     """Example Device model"""
     __tablename__ = "devices"
+    __table_args__ = (
+        UniqueConstraint("mac_address", "Network_id", name="uq_devices_mac_network"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     device_name = Column(String, index=True, nullable=False)
     device_type = Column(String, nullable=False)
-    mac_address = Column(String, unique=True, nullable=False)
+    mac_address = Column(String, nullable=False)
     ip_address = Column(String)
     confidence = Column(Float)
     #packet_count = Column(Integer)

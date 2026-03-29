@@ -2,6 +2,7 @@
 import pandas as pd
 from . import datapipeline as datapipeline
 import os
+import ipaddress
 
 
 def _resolve_report_output_path(traffic_file, report_file):
@@ -25,6 +26,17 @@ def _resolve_report_output_path(traffic_file, report_file):
     return resolved_path
 
 
+def _is_local_device_ip(ip_text):
+    """Return True for source IPs that likely represent local device addresses."""
+    try:
+        ip_obj = ipaddress.ip_address(ip_text)
+        if ip_text == '0.0.0.0':
+            return False
+        return ip_obj.is_private or ip_obj.is_link_local
+    except ValueError:
+        return False
+
+
 def generate_report(traffic_file, report_file, network=None):
     """
     Generate a report comparing traffic data against known devices in the database.
@@ -44,6 +56,17 @@ def generate_report(traffic_file, report_file, network=None):
             print("Unsupported file type. Please provide a .csv or .pcap file.")
             return
 
+        def _resolve_column(candidates):
+            for candidate in candidates:
+                if candidate in df.columns:
+                    return candidate
+            by_lower = {str(col).lower(): col for col in df.columns}
+            for candidate in candidates:
+                match = by_lower.get(candidate.lower())
+                if match is not None:
+                    return match
+            return None
+
         # --- Build a lookup of known devices from the database ---
         db_devices = datapipeline.get_devices_by_network(network) if network else []
         known_devices = {
@@ -52,27 +75,43 @@ def generate_report(traffic_file, report_file, network=None):
         }
 
         # --- Collect all unique source MACs seen in the traffic file ---
-        if 'eth.src' not in df.columns:
+        src_mac_col = _resolve_column(['eth.src'])
+        dst_mac_col = _resolve_column(['eth.dst'])
+        src_ip_col = _resolve_column(['IP.src', 'ip.src'])
+
+        if src_mac_col is None:
             print("Traffic file does not contain an 'eth.src' column.")
             return
 
-        traffic_macs = df['eth.src'].astype(str).str.lower().unique()
+        traffic_macs = df[src_mac_col].astype(str).str.lower().unique()
 
         report_rows = []
         for mac in traffic_macs:
             if mac in ('n/a', 'nan', '', 'none'):
                 continue
 
+            src_mask = df[src_mac_col].astype(str).str.lower() == mac
+
             # Packet counts: any packet where this MAC is source or destination
-            if 'eth.dst' in df.columns:
+            if dst_mac_col is not None:
                 total_packets = int(
-                    ((df['eth.src'].astype(str).str.lower() == mac) |
-                     (df['eth.dst'].astype(str).str.lower() == mac)).sum()
+                    (src_mask |
+                     (df[dst_mac_col].astype(str).str.lower() == mac)).sum()
                 )
             else:
                 total_packets = int(
-                    (df['eth.src'].astype(str).str.lower() == mac).sum()
+                    src_mask.sum()
                 )
+
+            if src_ip_col is not None:
+                ip_values = [
+                    ip.strip() for ip in df.loc[src_mask, src_ip_col].astype(str).tolist()
+                    if ip and ip.strip() and ip.strip().lower() not in ('n/a', 'nan', 'none')
+                ]
+                local_ip_values = sorted({ip for ip in ip_values if _is_local_device_ip(ip)})
+                source_ips = ', '.join(local_ip_values) if local_ip_values else 'N/A'
+            else:
+                source_ips = 'N/A'
 
             if mac in known_devices:
                 # MAC is registered — use stored classification
@@ -99,12 +138,13 @@ def generate_report(traffic_file, report_file, network=None):
                 'total_packets': total_packets,
                 'flagged': flagged,
                 'foreign': foreign,
+                'source_ips': source_ips,
             })
 
         report_df = pd.DataFrame(
             report_rows,
             columns=['device_name', 'device_type', 'mac_address', 'confidence',
-                     'total_packets', 'flagged', 'foreign']
+                     'total_packets', 'flagged', 'foreign', 'source_ips']
         )
         resolved_report_file = _resolve_report_output_path(traffic_file, report_file)
 
@@ -136,11 +176,17 @@ def generate_report(traffic_file, report_file, network=None):
         if report_df.empty:
             lines.append("No MAC addresses found in traffic file.")
         else:
-            display_cols = ['device_name', 'device_type', 'mac_address', 'confidence', 'total_packets']
+            display_cols = ['device_name', 'device_type', 'mac_address', 'confidence', 'total_packets', 'source_ips']
+            fixed_cols = ['device_name', 'device_type', 'mac_address', 'confidence', 'total_packets']
             widths = {
                 col: max(len(col), report_df[col].astype(str).map(len).max())
-                for col in display_cols
+                for col in fixed_cols
             }
+            widths['source_ips'] = len('source_ips')
+
+            def _format_row(row, marker=""):
+                left = "  ".join(f"{str(row[col]):<{widths[col]}}" for col in fixed_cols)
+                return f"{left}  {row['source_ips']}{marker}"
 
             lines.append("--- All Devices ---")
             lines.append("  ".join(f"{col:<{widths[col]}}" for col in display_cols))
@@ -152,9 +198,7 @@ def generate_report(traffic_file, report_file, network=None):
                     marker = " [FLAGGED]"
                 else:
                     marker = ""
-                lines.append(
-                    "  ".join(f"{str(row[col]):<{widths[col]}}" for col in display_cols) + marker
-                )
+                lines.append(_format_row(row, marker))
 
             flagged_df = report_df[report_df['flagged']]
             if not flagged_df.empty:
@@ -164,9 +208,7 @@ def generate_report(traffic_file, report_file, network=None):
                 lines.append("  ".join("-" * widths[col] for col in display_cols))
                 for _, row in flagged_df.iterrows():
                     marker = " [FOREIGN]" if row['foreign'] else ""
-                    lines.append(
-                        "  ".join(f"{str(row[col]):<{widths[col]}}" for col in display_cols) + marker
-                    )
+                    lines.append(_format_row(row, marker))
 
         with open(resolved_report_file, 'w', encoding='utf-8') as report_handle:
             report_handle.write("\n".join(lines))

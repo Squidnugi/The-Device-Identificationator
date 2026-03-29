@@ -3,7 +3,6 @@ import src
 import shutil
 import os
 from functools import wraps
-import tests.tui as tui
 
 def _require_command_password():
     """Prompt for the command password and validate it."""
@@ -279,7 +278,7 @@ def flagged():
 def dashboard():
     """View the dashboard (DEMO)"""
     click.echo(click.style('Opening dashboard...', fg='green', bold=True))
-    tui.DeviceIDApp().run()
+    src.DashboardApp().run()
     click.echo(click.style('Dashboard displayed! (DEMO)', fg='green', bold=True))
 
 def main():
