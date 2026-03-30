@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from typing import List
+from typing import Callable, List
 
 from rich.console import Group
 from rich.panel import Panel
@@ -21,11 +21,13 @@ if __package__ in (None, ""):
     from src.datapipeline import add_device, add_to_network, all_networks, get_devices_by_network
     from src.models import use_model
     from src.report import generate_report
+    from src.security import is_password_set, set_password, verify_password
     from src.tui.dashboard import DashboardScreen
 else:
     from ..datapipeline import add_device, add_to_network, all_networks, get_devices_by_network
     from ..models import use_model
     from ..report import generate_report
+    from ..security import is_password_set, set_password, verify_password
     from .dashboard import DashboardScreen
 
 
@@ -35,6 +37,71 @@ DEFAULT_CLASSIFICATION_FILE = "data/processed/16-09-24_extracted.csv"
 DEFAULT_REPORT_INPUT = "data/processed/16-09-24_extracted.csv"
 DEFAULT_REPORT_OUTPUT = "data/reports/report.txt"
 STATUS_STEP_DELAY_SECONDS = 0.15
+
+
+class PasswordPromptScreen(ModalScreen[tuple[str, str] | None]):
+    """Prompt for creating or changing a password (placeholder-only for now)."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, prompt_text: str) -> None:
+        super().__init__()
+        self._title = title
+        self._prompt_text = prompt_text
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(self._prompt_text, id="password-label")
+        yield Input(placeholder="Password", password=True, id="password-input")
+        yield Input(placeholder="Confirm password", password=True, id="password-confirm-input")
+        yield Static("Enter in confirm field to submit, Esc to cancel", id="password-help")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#password-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "password-input":
+            self.query_one("#password-confirm-input", Input).focus()
+            return
+
+        if event.input.id != "password-confirm-input":
+            return
+
+        password = self.query_one("#password-input", Input).value
+        confirm = self.query_one("#password-confirm-input", Input).value
+        self.dismiss((password, confirm))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class PasswordEntryScreen(ModalScreen[str | None]):
+    """Prompt for a single password entry before protected actions."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, prompt_text: str) -> None:
+        super().__init__()
+        self._prompt_text = prompt_text
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(self._prompt_text, id="password-entry-label")
+        yield Input(placeholder="Password", password=True, id="password-entry-input")
+        yield Static("Press Enter to submit, Esc to cancel", id="password-entry-help")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#password-entry-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "password-entry-input":
+            return
+        self.dismiss(event.value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class CreateNetworkScreen(ModalScreen[str | None]):
@@ -69,6 +136,7 @@ class App(TextualApp):
         ("c", "start_classification", "Start Classification"),
         ("r", "generate_report", "Generate Report"),
         ("d", "dashboard", "View Dashboard"),
+        ("p", "change_password", "Change Password"),
         ("[", "network_prev", "Prev Network"),
         ("]", "network_next", "Next Network"),
         ("enter", "network_apply", "Apply Network"),
@@ -82,6 +150,7 @@ class App(TextualApp):
         self.status_message: str = "Ready"
         self.current_devices: List = []
         self.operation_steps: List[str] = []
+        self.initial_setup_in_progress: bool = False
 
     def _add_operation_step(self, message: str) -> None:
         """Record operation progress messages and keep only recent entries."""
@@ -106,6 +175,183 @@ class App(TextualApp):
         self._load_network_options()
         self._load_devices_for_network()
         self._render_welcome()
+        self._run_initial_setup_flow()
+
+    def _is_password_configured(self) -> bool:
+        """Return True when a command password is configured."""
+        return is_password_set()
+
+    def _run_initial_setup_flow(self) -> None:
+        """Run first-time setup prompts in order: password first, then network."""
+        if not self._is_password_configured():
+            self.initial_setup_in_progress = True
+            self.push_screen(
+                PasswordPromptScreen(
+                    "Create Password",
+                    "No password found. Create a password to continue setup:",
+                ),
+                self._handle_initial_password_result,
+            )
+            return
+
+        self._maybe_prompt_initial_network()
+
+    def _maybe_prompt_initial_network(self) -> None:
+        """Prompt for initial network creation when no network is configured."""
+        if self.current_network != "Not set":
+            self.initial_setup_in_progress = False
+            return
+
+        self.initial_setup_in_progress = True
+        self.push_screen(CreateNetworkScreen(), self._handle_initial_network_result)
+
+    def _handle_initial_password_result(self, result: tuple[str, str] | None) -> None:
+        """Handle first-time password prompt result and persist password."""
+        if result is None:
+            self.status_message = "Password setup canceled"
+            self.initial_setup_in_progress = False
+            self._render_welcome()
+            return
+
+        if not self._save_password_from_prompt(result, "Password created"):
+            self.initial_setup_in_progress = False
+            self._render_welcome()
+            return
+
+        self._render_welcome()
+        self._maybe_prompt_initial_network()
+
+    def _save_password_from_prompt(self, result: tuple[str, str], success_message: str) -> bool:
+        """Validate and persist password entered via prompt."""
+        password, confirm = result
+        if not password:
+            self.status_message = "Password cannot be empty"
+            return False
+
+        if password != confirm:
+            self.status_message = "Password confirmation does not match"
+            return False
+
+        try:
+            set_password(password)
+        except Exception as exc:
+            self.status_message = f"Failed to save password: {exc}"
+            return False
+
+        self.status_message = success_message
+        return True
+
+    def _require_password_then(self, action_name: str, on_success: Callable[[], None]) -> None:
+        """Require an existing password (or create one) and then continue an action."""
+        if not self._is_password_configured():
+            self.push_screen(
+                PasswordPromptScreen(
+                    "Create Password",
+                    f"No password found. Create one before {action_name}:",
+                ),
+                lambda result: self._handle_missing_password_for_action(result, action_name, on_success),
+            )
+            return
+
+        self.push_screen(
+            PasswordEntryScreen(f"Enter password to {action_name}:"),
+            lambda result: self._handle_password_verification(result, action_name, on_success),
+        )
+
+    def _handle_missing_password_for_action(
+        self,
+        result: tuple[str, str] | None,
+        action_name: str,
+        on_success: Callable[[], None],
+    ) -> None:
+        """Handle create-password flow when a protected action has no password set."""
+        if result is None:
+            self.status_message = f"{action_name.capitalize()} canceled"
+            self._render_welcome()
+            return
+
+        if not self._save_password_from_prompt(result, "Password created"):
+            self._render_welcome()
+            return
+
+        self._render_welcome()
+        on_success()
+
+    def _handle_password_verification(
+        self,
+        result: str | None,
+        action_name: str,
+        on_success: Callable[[], None],
+    ) -> None:
+        """Verify entered password before continuing a protected action."""
+        if result is None:
+            self.status_message = f"{action_name.capitalize()} canceled"
+            self._render_welcome()
+            return
+
+        if not result.strip():
+            self.status_message = "Password cannot be empty"
+            self._render_welcome()
+            return
+
+        try:
+            if not verify_password(result):
+                self.status_message = "Authentication failed"
+                self._render_welcome()
+                return
+        except Exception as exc:
+            self.status_message = f"Password verification failed: {exc}"
+            self._render_welcome()
+            return
+
+        on_success()
+
+    def _require_network_then(self, action_name: str, on_success: Callable[[], None]) -> None:
+        """Require an active network (or create one) before continuing an action."""
+        if self.current_network != "Not set":
+            on_success()
+            return
+
+        self.push_screen(
+            CreateNetworkScreen(),
+            lambda result: self._handle_missing_network_for_action(result, action_name, on_success),
+        )
+
+    def _handle_missing_network_for_action(
+        self,
+        result: str | None,
+        action_name: str,
+        on_success: Callable[[], None],
+    ) -> None:
+        """Handle create-network flow when a protected action has no network configured."""
+        if result is None:
+            self.status_message = f"{action_name.capitalize()} canceled: no network configured"
+            self._render_welcome()
+            return
+
+        new_name = result.strip()
+        if not new_name:
+            self.status_message = "Network name cannot be empty"
+            self._render_welcome()
+            return
+
+        if new_name == CREATE_NETWORK_OPTION:
+            self.status_message = "Choose a different network name"
+            self._render_welcome()
+            return
+
+        if not self._create_and_select_network(new_name):
+            self._render_welcome()
+            return
+
+        self.status_message = f"Created network: {new_name}"
+        self._render_welcome()
+        on_success()
+
+    def _handle_initial_network_result(self, result: str | None) -> None:
+        """Handle first-time network prompt result after password stage."""
+        self.initial_setup_in_progress = False
+        self._handle_create_network_result(result)
 
     def _load_current_network(self) -> str:
         """Load the currently configured network from config/network.txt."""
@@ -210,6 +456,7 @@ class App(TextualApp):
             "]      Select next network\n"
             "Enter  Apply selected network\n"
             "       (or create one from bottom option)\n"
+            "p      Change password\n"
             "c      Start classification\n"
             "d      Open dashboard\n"
             "r      Generate report\n"
@@ -254,6 +501,24 @@ class App(TextualApp):
         self.query_one("#welcome", Static).update(renderable)
 
     async def action_generate_report(self) -> None:
+        """Require password before generating a report."""
+        if self.initial_setup_in_progress:
+            self.status_message = "Finish setup prompts before generating a report"
+            self._render_welcome()
+            return
+
+        self._require_password_then(
+            "running report",
+            lambda: self._require_network_then("running report", self._start_report_worker),
+        )
+
+    def _start_report_worker(self) -> None:
+        """Start report worker once password requirement passes."""
+        self.status_message = "Authentication successful"
+        self._render_welcome()
+        self.run_worker(self._run_generate_report())
+
+    async def _run_generate_report(self) -> None:
         """Generate a report from traffic data with visible step-by-step progress."""
         self.operation_steps = []
         await self._set_operation_status(
@@ -321,6 +586,24 @@ class App(TextualApp):
         self._render_welcome()
 
     async def action_start_classification(self) -> None:
+        """Require password before running classification."""
+        if self.initial_setup_in_progress:
+            self.status_message = "Finish setup prompts before starting classification"
+            self._render_welcome()
+            return
+
+        self._require_password_then(
+            "running classification",
+            lambda: self._require_network_then("running classification", self._start_classification_worker),
+        )
+
+    def _start_classification_worker(self) -> None:
+        """Start classification worker once password requirement passes."""
+        self.status_message = "Authentication successful"
+        self._render_welcome()
+        self.run_worker(self._run_start_classification())
+
+    async def _run_start_classification(self) -> None:
         """Run classification and save predictions with visible step-by-step progress."""
         self.operation_steps = []
         await self._set_operation_status(
@@ -394,6 +677,83 @@ class App(TextualApp):
     def action_dashboard(self) -> None:
         self.push_screen(DashboardScreen())
 
+    def action_change_password(self) -> None:
+        """Open password change flow with verification and persistence."""
+        if self.initial_setup_in_progress:
+            self.status_message = "Finish setup prompts before changing password"
+            self._render_welcome()
+            return
+
+        if not self._is_password_configured():
+            self.push_screen(
+                PasswordPromptScreen(
+                    "Create Password",
+                    "No password found. Create a password:",
+                ),
+                self._handle_create_password_from_change_action,
+            )
+            return
+
+        self.push_screen(
+            PasswordEntryScreen("Enter current password to continue:"),
+            self._handle_change_password_auth_result,
+        )
+
+    def _handle_create_password_from_change_action(self, result: tuple[str, str] | None) -> None:
+        """Create password when change-password is requested without existing auth."""
+        if result is None:
+            self.status_message = "Password creation canceled"
+            self._render_welcome()
+            return
+
+        if not self._save_password_from_prompt(result, "Password created"):
+            self._render_welcome()
+            return
+
+        self._render_welcome()
+
+    def _handle_change_password_auth_result(self, result: str | None) -> None:
+        """Handle pre-check password prompt before changing password."""
+        if result is None:
+            self.status_message = "Password change canceled"
+            self._render_welcome()
+            return
+
+        if not result.strip():
+            self.status_message = "Password cannot be empty"
+            self._render_welcome()
+            return
+
+        try:
+            if not verify_password(result):
+                self.status_message = "Authentication failed"
+                self._render_welcome()
+                return
+        except Exception as exc:
+            self.status_message = f"Password verification failed: {exc}"
+            self._render_welcome()
+            return
+
+        self.push_screen(
+            PasswordPromptScreen(
+                "Change Password",
+                "Enter a new password:",
+            ),
+            self._handle_change_password_result,
+        )
+
+    def _handle_change_password_result(self, result: tuple[str, str] | None) -> None:
+        """Handle password change result and persist new password."""
+        if result is None:
+            self.status_message = "Password change canceled"
+            self._render_welcome()
+            return
+
+        if not self._save_password_from_prompt(result, "Password changed"):
+            self._render_welcome()
+            return
+        self._render_welcome()
+
     def action_network_next(self) -> None:
         """Move network selector to the next available network."""
         if not self.network_options:
@@ -455,16 +815,22 @@ class App(TextualApp):
             self._render_welcome()
             return
 
+        if self._create_and_select_network(new_name):
+            self.status_message = f"Created and switched to network: {new_name}"
+        self._render_welcome()
+
+    def _create_and_select_network(self, network_name: str) -> bool:
+        """Create/select a network and refresh related UI state."""
         try:
-            add_to_network(new_name)
-            self._save_current_network(new_name)
-            self.current_network = new_name
+            add_to_network(network_name)
+            self._save_current_network(network_name)
+            self.current_network = network_name
             self._load_network_options()
             self._load_devices_for_network()
-            self.status_message = f"Created and switched to network: {new_name}"
+            return True
         except Exception as exc:
             self.status_message = f"Failed to create network: {exc}"
-        self._render_welcome()
+            return False
 
 
 
