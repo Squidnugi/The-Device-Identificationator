@@ -288,6 +288,13 @@ def dashboard():
     src.DashboardApp().run()
     click.echo(click.style('Dashboard displayed! (DEMO)', fg='green', bold=True))
 
+@cli.command(name='app')
+def application():
+    """Run the application (DEMO)"""
+    click.echo(click.style('Running the application...', fg='green', bold=True))
+    src.run_app()
+    click.echo(click.style('Application is running! (DEMO)', fg='green', bold=True))
+
 def main():
     #click.echo(click.style('Welcome to the Device Identificationator - Wizard (DEMO)', fg='cyan', bold=True))
     cli()

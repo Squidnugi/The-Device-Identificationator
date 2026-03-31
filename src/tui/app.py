@@ -1228,8 +1228,10 @@ class App(TextualApp):
             self.status_message = f"Failed to create network: {exc}"
             return False
 
-
+def run_app():
+    """Run the TUI application."""
+    App().run()
 
 
 if __name__ == "__main__":
-    App().run()
+    run_app()
