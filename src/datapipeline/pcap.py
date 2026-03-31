@@ -265,8 +265,14 @@ def save_dataframe_to_csv(df, output_path):
 def process_pcap(File="16-09-24.pcap", save_to_csv=True):
     raw_path = "data/raw/"
     processed_path = "data/processed/"
-    pcap_path = raw_path + File
-    output_csv_path = processed_path + File.replace('.pcap', '_extracted.csv')
+    if os.path.isabs(File) or os.path.exists(File):
+        pcap_path = File
+    else:
+        pcap_path = os.path.join(raw_path, File)
+
+    pcap_name = os.path.basename(pcap_path)
+    pcap_stem, _ = os.path.splitext(pcap_name)
+    output_csv_path = os.path.join(processed_path, f"{pcap_stem}_extracted.csv")
     
     time_start = time.time()
     print(f"\n{'='*70}")

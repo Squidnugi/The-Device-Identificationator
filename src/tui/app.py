@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
 from pathlib import Path
 from typing import Callable, List
@@ -18,13 +19,13 @@ if __package__ in (None, ""):
     REPO_ROOT = Path(__file__).resolve().parents[2]
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from src.datapipeline import add_device, add_to_network, all_networks, get_devices_by_network
+    from src.datapipeline import add_device, add_to_network, all_networks, capture_and_process_packets, create_all_tables, get_devices_by_network, process_pcap
     from src.models import use_model
     from src.report import generate_report
     from src.security import is_password_set, set_password, verify_password
     from src.tui.dashboard import DashboardScreen
 else:
-    from ..datapipeline import add_device, add_to_network, all_networks, get_devices_by_network
+    from ..datapipeline import add_device, add_to_network, all_networks, capture_and_process_packets, create_all_tables, get_devices_by_network, process_pcap
     from ..models import use_model
     from ..report import generate_report
     from ..security import is_password_set, set_password, verify_password
@@ -37,6 +38,8 @@ DEFAULT_CLASSIFICATION_FILE = "data/processed/16-09-24_extracted.csv"
 DEFAULT_REPORT_INPUT = "data/processed/16-09-24_extracted.csv"
 DEFAULT_REPORT_OUTPUT = "data/reports/report.txt"
 STATUS_STEP_DELAY_SECONDS = 0.15
+DEFAULT_CAPTURE_PACKET_COUNT = 100
+DATA_DIRECTORIES = ("data/processed", "data/raw", "data/reports")
 
 
 class PasswordPromptScreen(ModalScreen[tuple[str, str] | None]):
@@ -128,13 +131,82 @@ class CreateNetworkScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class CaptureSettingsScreen(ModalScreen[tuple[str, str] | None]):
+    """Prompt for live capture settings before starting sniffing."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, packet_count_default: int, interface_default: str) -> None:
+        super().__init__()
+        self._packet_count_default = packet_count_default
+        self._interface_default = interface_default
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("Configure traffic capture settings:", id="capture-settings-label")
+        yield Input(value=str(self._packet_count_default), placeholder="Packet count", id="capture-packet-count-input")
+        yield Input(value=self._interface_default, placeholder="Interface (Linux only)", id="capture-interface-input")
+        yield Static("Enter in interface field to submit, Esc to cancel", id="capture-settings-help")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#capture-packet-count-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "capture-packet-count-input":
+            self.query_one("#capture-interface-input", Input).focus()
+            return
+
+        if event.input.id != "capture-interface-input":
+            return
+
+        packet_count = self.query_one("#capture-packet-count-input", Input).value.strip()
+        interface = self.query_one("#capture-interface-input", Input).value.strip()
+        self.dismiss((packet_count, interface))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class FilePathPromptScreen(ModalScreen[str | None]):
+    """Prompt for a file path used by report/classification actions."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, label: str, default_path: str, input_id: str = "file-path-input") -> None:
+        super().__init__()
+        self._label = label
+        self._default_path = default_path
+        self._input_id = input_id
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(self._label, id="file-path-label")
+        yield Input(value=self._default_path, placeholder="Path to CSV or PCAP file", id=self._input_id)
+        yield Static("Press Enter to submit, Esc to cancel", id="file-path-help")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one(f"#{self._input_id}", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != self._input_id:
+            return
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class App(TextualApp):
     """Main application class for the TUI."""
 
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("c", "start_classification", "Start Classification"),
+        ("s", "start_capture", "Capture Traffic"),
         ("r", "generate_report", "Generate Report"),
+        ("x", "clear_data", "Clear Data"),
         ("d", "dashboard", "View Dashboard"),
         ("p", "change_password", "Change Password"),
         ("[", "network_prev", "Prev Network"),
@@ -151,6 +223,12 @@ class App(TextualApp):
         self.current_devices: List = []
         self.operation_steps: List[str] = []
         self.initial_setup_in_progress: bool = False
+        self.capture_packet_count: int = DEFAULT_CAPTURE_PACKET_COUNT
+        self.capture_interface: str = "eth0"
+        self.last_capture_pcap: str | None = None
+        self.last_capture_csv: str | None = None
+        self.selected_classification_file: str | None = None
+        self.selected_report_file: str | None = None
 
     def _add_operation_step(self, message: str) -> None:
         """Record operation progress messages and keep only recent entries."""
@@ -171,11 +249,20 @@ class App(TextualApp):
         yield Static(id="welcome")
 
     def on_mount(self) -> None:
+        self._ensure_database_ready()
         self.current_network = self._load_current_network()
         self._load_network_options()
         self._load_devices_for_network()
         self._render_welcome()
         self._run_initial_setup_flow()
+
+    def _ensure_database_ready(self) -> None:
+        """Create required database tables before app workflows run."""
+        try:
+            create_all_tables()
+        except Exception as exc:
+            self.status_message = f"Database initialization failed: {exc}"
+            self._add_operation_step(f"Startup warning: database initialization failed ({exc})")
 
     def _is_password_configured(self) -> bool:
         """Return True when a command password is configured."""
@@ -403,6 +490,30 @@ class App(TextualApp):
             except Exception:
                 self.current_devices = []
 
+    def _resolve_classification_file(self) -> str | None:
+        """Pick dataset for classification, preferring most recent captured CSV."""
+        if self.last_capture_csv and Path(self.last_capture_csv).exists():
+            return self.last_capture_csv
+
+        processed_dir = Path("data/processed")
+        if processed_dir.exists():
+            csv_candidates = [
+                path for path in processed_dir.glob("*_extracted.csv") if path.is_file()
+            ]
+            if csv_candidates:
+                latest = max(csv_candidates, key=lambda path: path.stat().st_mtime)
+                return str(latest)
+
+        if Path(DEFAULT_CLASSIFICATION_FILE).exists():
+            return DEFAULT_CLASSIFICATION_FILE
+        return None
+
+    @staticmethod
+    def _supported_traffic_extension(file_path: str) -> bool:
+        """Return True when file is a supported traffic input format."""
+        suffix = Path(file_path).suffix.lower()
+        return suffix in {".csv", ".pcap", ".pcapng"}
+
     def _build_devices_panel(self) -> Panel:
         """Build a panel showing all devices in the current network."""
         table = Table(show_header=True, header_style="bold magenta")
@@ -415,22 +526,59 @@ class App(TextualApp):
             table.add_row("—", "—", "—", "—", style="dim")
         else:
             for device in self.current_devices:
+                confidence_value = None
                 try:
-                    conf_str = f"{float(device.confidence):.2f}" if device.confidence else "N/A"
+                    confidence_value = float(device.confidence) if device.confidence is not None else None
+                    conf_str = f"{confidence_value:.2f}" if confidence_value is not None else "N/A"
                 except (ValueError, TypeError):
                     conf_str = str(device.confidence)
+
+                row_style = "red" if confidence_value is not None and confidence_value < 0.6 else ""
 
                 table.add_row(
                     device.device_name or "—",
                     device.mac_address or "—",
                     device.ip_address or "—",
                     conf_str,
+                    style=row_style,
                 )
 
         return Panel(
             table,
             title=f"Devices ({len(self.current_devices)})",
             border_style="blue",
+        )
+
+    def _build_flagged_devices_panel(self) -> Panel:
+        """Build a panel showing flagged devices using the CLI threshold."""
+        table = Table(show_header=True, header_style="bold red")
+        table.add_column("Device Name", style="red")
+        table.add_column("MAC Address", style="dim")
+        table.add_column("Confidence", style="red")
+
+        flagged_devices = []
+        for device in self.current_devices:
+            try:
+                confidence = float(device.confidence or 0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if confidence < 0.6:
+                flagged_devices.append((device, confidence))
+
+        if not flagged_devices:
+            table.add_row("-", "-", "-", style="dim")
+        else:
+            for device, confidence in flagged_devices:
+                table.add_row(
+                    device.device_name or "Unknown",
+                    device.mac_address or "N/A",
+                    f"{confidence:.2f}",
+                )
+
+        return Panel(
+            table,
+            title=f"Flagged Devices ({len(flagged_devices)})",
+            border_style="red",
         )
 
     def _render_welcome(self) -> None:
@@ -457,9 +605,11 @@ class App(TextualApp):
             "Enter  Apply selected network\n"
             "       (or create one from bottom option)\n"
             "p      Change password\n"
+            "s      Capture traffic (pcap + processed csv)\n"
             "c      Start classification\n"
             "d      Open dashboard\n"
             "r      Generate report\n"
+            "x      Clear data folders\n"
             "q      Quit"
         )
 
@@ -487,8 +637,13 @@ class App(TextualApp):
             ),
         )
 
+        right_column = Group(
+            self._build_devices_panel(),
+            self._build_flagged_devices_panel(),
+        )
+
         layout_table = Table.grid(padding=1)
-        layout_table.add_row(left_column, self._build_devices_panel())
+        layout_table.add_row(left_column, right_column)
 
         renderable = Group(
             layout_table,
@@ -509,16 +664,50 @@ class App(TextualApp):
 
         self._require_password_then(
             "running report",
-            lambda: self._require_network_then("running report", self._start_report_worker),
+            lambda: self._require_network_then("running report", self._prompt_report_source_file),
         )
 
-    def _start_report_worker(self) -> None:
+    def _prompt_report_source_file(self) -> None:
+        """Prompt user to choose which CSV file to use for report generation."""
+        default_source = self.selected_report_file or self._resolve_classification_file() or DEFAULT_REPORT_INPUT
+        self.push_screen(
+            FilePathPromptScreen("Enter source file (.csv or .pcap) for report generation:", default_source, "report-file-input"),
+            self._handle_report_source_file_result,
+        )
+
+    def _handle_report_source_file_result(self, result: str | None) -> None:
+        """Validate selected report source file then start report worker."""
+        if result is None:
+            self.status_message = "Report canceled"
+            self._render_welcome()
+            return
+
+        source_file = result.strip()
+        if not source_file:
+            self.status_message = "Report source file cannot be empty"
+            self._render_welcome()
+            return
+
+        if not Path(source_file).exists():
+            self.status_message = f"Report source file not found: {source_file}"
+            self._render_welcome()
+            return
+
+        if not self._supported_traffic_extension(source_file):
+            self.status_message = "Unsupported report file type. Use .csv or .pcap"
+            self._render_welcome()
+            return
+
+        self.selected_report_file = source_file
+        self._start_report_worker(source_file)
+
+    def _start_report_worker(self, source_file: str) -> None:
         """Start report worker once password requirement passes."""
         self.status_message = "Authentication successful"
         self._render_welcome()
-        self.run_worker(self._run_generate_report())
+        self.run_worker(self._run_generate_report(source_file))
 
-    async def _run_generate_report(self) -> None:
+    async def _run_generate_report(self, source_file: str) -> None:
         """Generate a report from traffic data with visible step-by-step progress."""
         self.operation_steps = []
         await self._set_operation_status(
@@ -533,7 +722,6 @@ class App(TextualApp):
             )
             return
 
-        source_file = DEFAULT_REPORT_INPUT
         await self._set_operation_status(
             "Report in progress (2/5): checking source file",
             f"Report 2/5: Checking source file ({source_file})",
@@ -594,16 +782,210 @@ class App(TextualApp):
 
         self._require_password_then(
             "running classification",
-            lambda: self._require_network_then("running classification", self._start_classification_worker),
+            lambda: self._require_network_then("running classification", self._prompt_classification_file),
         )
 
-    def _start_classification_worker(self) -> None:
+    async def action_clear_data(self) -> None:
+        """Require password before clearing generated data folders."""
+        if self.initial_setup_in_progress:
+            self.status_message = "Finish setup prompts before clearing data"
+            self._render_welcome()
+            return
+
+        self._require_password_then("clearing data", self._start_clear_data_worker)
+
+    def _start_clear_data_worker(self) -> None:
+        """Start clear-data worker once password requirement passes."""
+        self.status_message = "Authentication successful"
+        self._render_welcome()
+        self.run_worker(self._run_clear_data())
+
+    async def _run_clear_data(self) -> None:
+        """Clear generated data directories and recreate them."""
+        self.operation_steps = []
+        await self._set_operation_status(
+            "Clear in progress (1/3): removing data folders",
+            "Clear 1/3: Removing data/processed, data/raw, data/reports",
+        )
+
+        try:
+            for directory in DATA_DIRECTORIES:
+                await asyncio.to_thread(shutil.rmtree, directory, True)
+
+            await self._set_operation_status(
+                "Clear in progress (2/3): recreating data folders",
+                "Clear 2/3: Recreating data folders",
+            )
+
+            for directory in DATA_DIRECTORIES:
+                await asyncio.to_thread(Path(directory).mkdir, parents=True, exist_ok=True)
+
+            self.selected_classification_file = None
+            self.selected_report_file = None
+            self.last_capture_pcap = None
+            self.last_capture_csv = None
+
+            await self._set_operation_status(
+                "All data cleared",
+                "Clear 3/3: Complete",
+            )
+            self._add_operation_step("Reset: capture and selected source file history cleared")
+        except Exception as exc:
+            await self._set_operation_status(
+                f"Clear failed: {exc}",
+                f"Failed: {exc}",
+            )
+
+        self._render_welcome()
+
+    def _prompt_classification_file(self) -> None:
+        """Prompt user to choose which source file to use for classification."""
+        default_source = self.selected_classification_file or self._resolve_classification_file() or DEFAULT_CLASSIFICATION_FILE
+        self.push_screen(
+            FilePathPromptScreen("Enter source file (.csv or .pcap) for classification:", default_source, "classification-file-input"),
+            self._handle_classification_file_result,
+        )
+
+    def _handle_classification_file_result(self, result: str | None) -> None:
+        """Validate selected classification file then start worker."""
+        if result is None:
+            self.status_message = "Classification canceled"
+            self._render_welcome()
+            return
+
+        classification_file = result.strip()
+        if not classification_file:
+            self.status_message = "Classification file cannot be empty"
+            self._render_welcome()
+            return
+
+        if not Path(classification_file).exists():
+            self.status_message = f"Classification file not found: {classification_file}"
+            self._render_welcome()
+            return
+
+        if not self._supported_traffic_extension(classification_file):
+            self.status_message = "Unsupported classification file type. Use .csv or .pcap"
+            self._render_welcome()
+            return
+
+        self.selected_classification_file = classification_file
+        self._start_classification_worker(classification_file)
+
+    async def action_start_capture(self) -> None:
+        """Require password before capturing traffic and generating processed CSV."""
+        if self.initial_setup_in_progress:
+            self.status_message = "Finish setup prompts before capturing traffic"
+            self._render_welcome()
+            return
+
+        self._require_password_then("capturing traffic", self._prompt_capture_settings)
+
+    def _prompt_capture_settings(self) -> None:
+        """Open capture settings prompt before starting live capture."""
+        self.push_screen(
+            CaptureSettingsScreen(self.capture_packet_count, self.capture_interface),
+            self._handle_capture_settings_result,
+        )
+
+    def _handle_capture_settings_result(self, result: tuple[str, str] | None) -> None:
+        """Validate capture settings from prompt and start capture worker."""
+        if result is None:
+            self.status_message = "Capture canceled"
+            self._render_welcome()
+            return
+
+        packet_count_raw, interface_raw = result
+        if not packet_count_raw:
+            self.status_message = "Packet count is required"
+            self._render_welcome()
+            return
+
+        try:
+            packet_count = int(packet_count_raw)
+        except ValueError:
+            self.status_message = "Packet count must be a valid integer"
+            self._render_welcome()
+            return
+
+        if packet_count <= 0:
+            self.status_message = "Packet count must be greater than 0"
+            self._render_welcome()
+            return
+
+        self.capture_packet_count = packet_count
+        self.capture_interface = interface_raw or "eth0"
+        self._start_capture_worker()
+
+    def _start_capture_worker(self) -> None:
+        """Start live-capture worker once password requirement passes."""
+        self.status_message = "Authentication successful"
+        self._render_welcome()
+        self.run_worker(self._run_capture_traffic())
+
+    async def _run_capture_traffic(self) -> None:
+        """Capture live traffic and generate both pcap and extracted CSV outputs."""
+        self.operation_steps = []
+        await self._set_operation_status(
+            "Capture in progress (1/4): preparing output paths",
+            "Capture 1/4: Preparing output paths",
+        )
+
+        try:
+            await self._set_operation_status(
+                f"Capture in progress (2/4): sniffing {self.capture_packet_count} packets",
+                "Capture 2/4: Capturing live packets",
+            )
+
+            capture_result = await asyncio.to_thread(
+                capture_and_process_packets,
+                packet_count=self.capture_packet_count,
+                interface=self.capture_interface,
+            )
+            if not capture_result:
+                await self._set_operation_status(
+                    "Capture failed or produced no output files",
+                    "Stopped: no capture output",
+                )
+                return
+
+            await self._set_operation_status(
+                "Capture in progress (3/4): verifying generated files",
+                "Capture 3/4: Verifying generated files",
+            )
+
+            pcap_path = capture_result["pcap_file"]
+            csv_path = capture_result["processed_csv"]
+            if not Path(pcap_path).exists() or not Path(csv_path).exists():
+                await self._set_operation_status(
+                    "Capture outputs are missing after processing",
+                    "Stopped: output validation failed",
+                )
+                return
+
+            await self._set_operation_status(
+                f"Capture complete: {Path(csv_path).name}",
+                "Capture 4/4: Finalizing",
+            )
+            self.last_capture_pcap = pcap_path
+            self.last_capture_csv = csv_path
+            self._add_operation_step(f"PCAP saved to {pcap_path}")
+            self._add_operation_step(f"CSV saved to {csv_path}")
+        except Exception as exc:
+            await self._set_operation_status(
+                f"Capture failed: {exc}",
+                f"Failed: {exc}",
+            )
+
+        self._render_welcome()
+
+    def _start_classification_worker(self, classification_file: str) -> None:
         """Start classification worker once password requirement passes."""
         self.status_message = "Authentication successful"
         self._render_welcome()
-        self.run_worker(self._run_start_classification())
+        self.run_worker(self._run_start_classification(classification_file))
 
-    async def _run_start_classification(self) -> None:
+    async def _run_start_classification(self, classification_file: str) -> None:
         """Run classification and save predictions with visible step-by-step progress."""
         self.operation_steps = []
         await self._set_operation_status(
@@ -620,12 +1002,16 @@ class App(TextualApp):
 
         await self._set_operation_status(
             "Classification in progress (2/6): checking dataset file",
-            f"Classification 2/6: Checking dataset file ({DEFAULT_CLASSIFICATION_FILE})",
+            (
+                f"Classification 2/6: Checking dataset file ({classification_file})"
+                if classification_file
+                else "Classification 2/6: Checking dataset file"
+            ),
         )
 
-        if not Path(DEFAULT_CLASSIFICATION_FILE).exists():
+        if not classification_file or not Path(classification_file).exists():
             await self._set_operation_status(
-                f"Dataset not found: {DEFAULT_CLASSIFICATION_FILE}",
+                "Dataset not found: no processed CSV is available",
                 "Stopped: dataset file not found",
             )
             return
@@ -642,7 +1028,17 @@ class App(TextualApp):
                 "Classification 4/6: Running model inference",
             )
 
-            results = await asyncio.to_thread(use_model, file_path=DEFAULT_CLASSIFICATION_FILE)
+            if Path(classification_file).suffix.lower() in {".pcap", ".pcapng"}:
+                dataset = await asyncio.to_thread(process_pcap, File=classification_file, save_to_csv=False)
+                if dataset is None or dataset.empty:
+                    await self._set_operation_status(
+                        "Classification failed: no data extracted from selected pcap",
+                        "Stopped: empty pcap extraction result",
+                    )
+                    return
+                results = await asyncio.to_thread(use_model, file_path=classification_file, dataset=dataset)
+            else:
+                results = await asyncio.to_thread(use_model, file_path=classification_file)
 
             await self._set_operation_status(
                 "Classification in progress (5/6): writing predictions",

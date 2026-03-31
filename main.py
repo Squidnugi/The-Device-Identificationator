@@ -144,10 +144,17 @@ def identifier(file):
 #creates pcap file for demo purposes
 #files generate in data/raw/ with name format: 16-09-24.csv
 @cli.command()
-def scanner():
+@click.option('--packets', default=100, show_default=True, type=int, help='Number of packets to capture')
+def scanner(packets):
     """Run a network scan (DEMO)"""
     click.echo(click.style('Running device scanning...', fg='green', bold=True))
-    src.capture_packets()
+    capture_result = src.capture_and_process_packets(packet_count=packets)
+    if capture_result is None:
+        click.echo(click.style('Scanning failed. Could not capture/process traffic.', fg='red', bold=True))
+        return
+
+    click.echo(click.style(f"PCAP saved to: {capture_result['pcap_file']}", fg='cyan', bold=True))
+    click.echo(click.style(f"Processed CSV saved to: {capture_result['processed_csv']}", fg='cyan', bold=True))
     click.echo(click.style('Scanning complete! (DEMO)', fg='green', bold=True))
 
 #creates a report for demo purposes
