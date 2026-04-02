@@ -64,6 +64,7 @@ class PasswordPromptScreen(ModalScreen[tuple[str, str] | None]):
         self.query_one("#password-input", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Move focus from password to confirm field, then validate and submit result."""
         if event.input.id == "password-input":
             self.query_one("#password-confirm-input", Input).focus()
             return
