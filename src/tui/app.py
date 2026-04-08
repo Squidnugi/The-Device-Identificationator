@@ -15,6 +15,7 @@ from textual.app import App as TextualApp, ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Static
 
+# Handle relative imports for both direct execution and package execution contexts.
 if __package__ in (None, ""):
     REPO_ROOT = Path(__file__).resolve().parents[2]
     if str(REPO_ROOT) not in sys.path:
@@ -32,6 +33,9 @@ else:
     from .dashboard import DashboardScreen
 
 
+# -----------------------------------------------------------------------------
+# Configuration constants
+# -----------------------------------------------------------------------------
 NETWORK_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "network.txt"
 CREATE_NETWORK_OPTION = "+ Create new network..."
 DEFAULT_CLASSIFICATION_FILE = "data/processed/16-09-24_extracted.csv"
@@ -42,6 +46,9 @@ DEFAULT_CAPTURE_PACKET_COUNT = 100
 DATA_DIRECTORIES = ("data/processed", "data/raw", "data/reports")
 
 
+# -----------------------------------------------------------------------------
+# Modal screens (prompts/forms)
+# -----------------------------------------------------------------------------
 class PasswordPromptScreen(ModalScreen[tuple[str, str] | None]):
     """Prompt for creating or changing a password (placeholder-only for now)."""
 
@@ -215,6 +222,7 @@ class App(TextualApp):
         ("enter", "network_apply", "Apply Network"),
     ]
 
+    # ----- Application state -------------------------------------------------
     def __init__(self) -> None:
         super().__init__()
         self.network_options: List[str] = []
@@ -231,6 +239,7 @@ class App(TextualApp):
         self.selected_classification_file: str | None = None
         self.selected_report_file: str | None = None
 
+    # ----- Shared operation/status helpers ----------------------------------
     def _add_operation_step(self, message: str) -> None:
         """Record operation progress messages and keep only recent entries."""
         self.operation_steps.append(message)
@@ -244,6 +253,7 @@ class App(TextualApp):
         self._render_welcome()
         await asyncio.sleep(STATUS_STEP_DELAY_SECONDS)
 
+    # ----- App lifecycle -----------------------------------------------------
     def compose(self) -> ComposeResult:
         yield Header()
         yield Footer()
@@ -257,6 +267,7 @@ class App(TextualApp):
         self._render_welcome()
         self._run_initial_setup_flow()
 
+    # ----- Initial setup and password flows ---------------------------------
     def _ensure_database_ready(self) -> None:
         """Create required database tables before app workflows run."""
         try:
@@ -329,6 +340,7 @@ class App(TextualApp):
         self.status_message = success_message
         return True
 
+    # ----- Action guards: password/network requirements ----------------------
     def _require_password_then(self, action_name: str, on_success: Callable[[], None]) -> None:
         """Require an existing password (or create one) and then continue an action."""
         if not self._is_password_configured():
@@ -436,6 +448,7 @@ class App(TextualApp):
         self._render_welcome()
         on_success()
 
+    # ----- Network and data source state ------------------------------------
     def _handle_initial_network_result(self, result: str | None) -> None:
         """Handle first-time network prompt result after password stage."""
         self.initial_setup_in_progress = False
@@ -515,6 +528,7 @@ class App(TextualApp):
         suffix = Path(file_path).suffix.lower()
         return suffix in {".csv", ".pcap", ".pcapng"}
 
+    # ----- Rendering helpers -------------------------------------------------
     def _build_devices_panel(self) -> Panel:
         """Build a panel showing all devices in the current network."""
         table = Table(show_header=True, header_style="bold magenta")
@@ -656,6 +670,7 @@ class App(TextualApp):
         )
         self.query_one("#welcome", Static).update(renderable)
 
+    # ----- Report flow -------------------------------------------------------
     async def action_generate_report(self) -> None:
         """Require password before generating a report."""
         if self.initial_setup_in_progress:
@@ -774,6 +789,7 @@ class App(TextualApp):
 
         self._render_welcome()
 
+    # ----- Classification flow ------------------------------------------------
     async def action_start_classification(self) -> None:
         """Require password before running classification."""
         if self.initial_setup_in_progress:
@@ -786,6 +802,7 @@ class App(TextualApp):
             lambda: self._require_network_then("running classification", self._prompt_classification_file),
         )
 
+    # ----- Data reset flow ---------------------------------------------------
     async def action_clear_data(self) -> None:
         """Require password before clearing generated data folders."""
         if self.initial_setup_in_progress:
@@ -839,6 +856,7 @@ class App(TextualApp):
 
         self._render_welcome()
 
+    # ----- Live capture flow -------------------------------------------------
     def _prompt_classification_file(self) -> None:
         """Prompt user to choose which source file to use for classification."""
         default_source = self.selected_classification_file or self._resolve_classification_file() or DEFAULT_CLASSIFICATION_FILE
@@ -1071,6 +1089,7 @@ class App(TextualApp):
 
         self._render_welcome()
 
+    # ----- Password management action ---------------------------------------
     def action_dashboard(self) -> None:
         self.push_screen(DashboardScreen())
 
@@ -1151,6 +1170,7 @@ class App(TextualApp):
             return
         self._render_welcome()
 
+    # ----- Network selector actions -----------------------------------------
     def action_network_next(self) -> None:
         """Move network selector to the next available network."""
         if not self.network_options:
@@ -1229,6 +1249,10 @@ class App(TextualApp):
             self.status_message = f"Failed to create network: {exc}"
             return False
 
+
+# -----------------------------------------------------------------------------
+# Entrypoint
+# -----------------------------------------------------------------------------
 def run_app():
     """Run the TUI application."""
     App().run()
