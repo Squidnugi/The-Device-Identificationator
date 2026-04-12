@@ -2,6 +2,7 @@ import pandas as pd
 import time
 from scapy.all import rdpcap, IP, TCP, UDP, Ether, DNS, DNSQR, Raw
 import os
+from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 from scipy.stats import entropy
@@ -308,6 +309,64 @@ def process_pcap(File="16-09-24.pcap", save_to_csv=True):
     if not save_to_csv:
         return df
     return None
+
+
+def process_and_merge_pcaps(
+    raw_dir="data/raw/train_files",
+    merged_output_path="data/processed/merged_training_extracted.csv",
+    include_patterns=("*.pcap", "*.pcapng"),
+    save_individual_csv=True,
+):
+    """Process every PCAP in a directory and merge into one training dataset."""
+    raw_path = Path(raw_dir)
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Raw directory not found: {raw_path}")
+
+    pcap_files = []
+    for pattern in include_patterns:
+        pcap_files.extend(raw_path.glob(pattern))
+    pcap_files = sorted(set(pcap_files))
+
+    if not pcap_files:
+        raise FileNotFoundError(
+            f"No PCAP files found in {raw_path} using patterns: {include_patterns}"
+        )
+
+    processed_dir = Path("data/processed")
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    merged_path = Path(merged_output_path)
+    merged_path.parent.mkdir(parents=True, exist_ok=True)
+    if merged_path.exists():
+        merged_path.unlink()
+
+    total_rows = 0
+    wrote_header = False
+
+    print(f"Found {len(pcap_files)} PCAP file(s) to process.")
+    for pcap_file in pcap_files:
+        print(f"\nProcessing: {pcap_file}")
+        df = process_pcap(File=str(pcap_file), save_to_csv=False)
+
+        if df is None or df.empty:
+            print(f"Skipping empty/failed dataset: {pcap_file}")
+            continue
+
+        if save_individual_csv:
+            single_output = processed_dir / f"{pcap_file.stem}_extracted.csv"
+            save_dataframe_to_csv(df, str(single_output))
+
+        df.to_csv(merged_path, mode='a', index=False, header=not wrote_header)
+        wrote_header = True
+        total_rows += len(df)
+
+    if total_rows == 0:
+        raise ValueError("No valid processed datasets were produced from the supplied PCAP files.")
+
+    print(f"\nMerged dataset created: {merged_path}")
+    print(f"Merged rows: {total_rows:,}")
+
+    return None, str(merged_path)
 
 
 if __name__ == "__main__":

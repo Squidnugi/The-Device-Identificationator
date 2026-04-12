@@ -1193,9 +1193,14 @@ class App(TextualApp):
 
     def action_network_apply(self) -> None:
         """Apply selected network as the current configured network."""
+        if self.initial_setup_in_progress:
+            self.status_message = "Finish setup prompts before changing network"
+            self._render_welcome()
+            return
+
         selected = self._selected_network()
         if selected == CREATE_NETWORK_OPTION:
-            self.push_screen(CreateNetworkScreen(), self._handle_create_network_result)
+            self._require_password_then("changing network", self._open_create_network_prompt)
             return
 
         if selected == "Not set":
@@ -1203,6 +1208,14 @@ class App(TextualApp):
             self._render_welcome()
             return
 
+        self._require_password_then("changing network", lambda: self._apply_network_selection(selected))
+
+    def _open_create_network_prompt(self) -> None:
+        """Open create-network prompt after authentication succeeds."""
+        self.push_screen(CreateNetworkScreen(), self._handle_create_network_result)
+
+    def _apply_network_selection(self, selected: str) -> None:
+        """Persist the selected network and refresh UI state."""
         try:
             add_to_network(selected)
             self._save_current_network(selected)

@@ -2,13 +2,35 @@ import click
 import src
 import shutil
 import os
+from pathlib import Path
 from functools import wraps
+
+
+NETWORK_CONFIG_PATH = Path("config/network.txt")
+DEFAULT_NETWORK_NAME = "Default_Network"
+SUPPORTED_TRAFFIC_EXTENSIONS = {".csv", ".pcap", ".pcapng"}
+DATA_DIRECTORIES = ("data/processed", "data/raw", "data/reports")
+
+
+def _read_current_network() -> str | None:
+    """Return configured network name from config/network.txt, if present."""
+    try:
+        content = NETWORK_CONFIG_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return content or None
+
+
+def _write_current_network(network_name: str) -> None:
+    """Persist current network to config/network.txt."""
+    NETWORK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    NETWORK_CONFIG_PATH.write_text(str(network_name).strip(), encoding="utf-8")
 
 def _require_command_password():
     """Prompt for the command password and validate it."""
     if not src.is_password_set():
         click.echo(click.style('No command password is configured yet.', fg='yellow', bold=True))
-        click.echo(click.style('Run: python main.py setup-password', fg='yellow'))
+        click.echo(click.style('Run: python main.py setup', fg='yellow'))
         return False
 
     password = click.prompt('Command password', hide_input=True)
@@ -17,34 +39,39 @@ def _require_command_password():
         return False
     return True
 
+
+def _require_command_authentication():
+    """Decorator that enforces command-password authentication."""
+    def decorator(func):
+        @wraps(func)
+        @click.pass_context
+        def wrapper(ctx, *args, **kwargs):
+            if not _require_command_password():
+                return
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
 def _require_network_configured():      
     """Decorator that checks if a network is configured in network.txt"""
     def decorator(func):
         @wraps(func)
         @click.pass_context
         def wrapper(ctx, *args, **kwargs):
-            try:
-                with open('config/network.txt', 'r') as f:
-                    content = f.read().strip()
-                    if not content:
-                        click.echo(click.style('No network configured. Run: python main.py network --change <network_name>', fg='yellow'))
-                        return
-            except FileNotFoundError:
+            content = _read_current_network()
+            if not content:
                 click.echo(click.style('No network configured. Run: python main.py network --change <network_name>', fg='yellow'))
                 return
-                
+
             return func(*args, **kwargs)
         return wrapper
     return decorator
 
 def grab_network():
     """Helper function to grab the current network from network.txt"""
-    try:
-        with open('config/network.txt', 'r') as f:
-            content = f.read().strip()
-            return content
-    except FileNotFoundError:
-        return None
+    return _read_current_network()
 
 
 def _echo_colored_report(report_text):
@@ -111,30 +138,35 @@ def setup(change):
         password = click.prompt('Set command password', hide_input=True, confirmation_prompt=True)
         src.set_password(password)
         click.echo(click.style('Password saved.', fg='green', bold=True))
-        with open('config/network.txt', 'r') as f:
-            content = f.read().strip()
-            src.add_to_network('Default_Network')
-            if not content:
-                with open('config/network.txt', 'w') as f:
-                    f.write('Default_Network')
+        src.add_to_network(DEFAULT_NETWORK_NAME)
+        if not _read_current_network():
+            _write_current_network(DEFAULT_NETWORK_NAME)
         click.echo(click.style('Default network created.', fg='green', bold=True))
 
 
 @cli.command()
 @click.option('--file', default='data/processed/16-09-24_extracted.csv', help='Path to the dataset file')
+@_require_command_authentication()
 @_require_network_configured()
 def identifier(file):
     """Run device identification analysis (DEMO)"""
+    source_path = Path(file)
+    if not source_path.exists():
+        click.echo(click.style(f'Dataset file not found: {file}', fg='red', bold=True))
+        return
+
+    if source_path.suffix.lower() not in SUPPORTED_TRAFFIC_EXTENSIONS:
+        click.echo(click.style('Unsupported file type. Please provide a .csv, .pcap, or .pcapng file.', fg='red', bold=True))
+        return
+
     click.echo(click.style('Running device identification analysis...', fg='green', bold=True))
     data = None
-    if file.endswith('.csv'):
+    if source_path.suffix.lower() == '.csv':
         click.echo(click.style('Processing CSV file...', fg='green', bold=True))
-    elif file.endswith('.pcap'):
+    elif source_path.suffix.lower() in {'.pcap', '.pcapng'}:
         click.echo(click.style('Processing pcap file...', fg='green', bold=True))
         data = src.process_pcap(file, save_to_csv=False)
-    else:
-        click.echo(click.style('Unsupported file type. Please provide a .csv or .pcap file.', fg='red', bold=True))
-        return
+
     results = src.use_model(file_path=file, dataset=data)
     click.echo(click.style('Analysis complete! (DEMO)', fg='green', bold=True))
     click.echo(click.style(results.to_string(), fg='green', bold=True))
@@ -144,11 +176,13 @@ def identifier(file):
 #creates pcap file for demo purposes
 #files generate in data/raw/ with name format: 16-09-24.csv
 @cli.command()
-@click.option('--packets', default=100, show_default=True, type=int, help='Number of packets to capture')
-def scanner(packets):
+@click.option('--packets', default=100, show_default=True, type=click.IntRange(1), help='Number of packets to capture')
+@click.option('--interface', default='eth0', show_default=True, help='Network interface to capture on (Linux/Unix)')
+@_require_command_authentication()
+def scanner(packets, interface):
     """Run a network scan (DEMO)"""
     click.echo(click.style('Running device scanning...', fg='green', bold=True))
-    capture_result = src.capture_and_process_packets(packet_count=packets)
+    capture_result = src.capture_and_process_packets(packet_count=packets, interface=interface)
     if capture_result is None:
         click.echo(click.style('Scanning failed. Could not capture/process traffic.', fg='red', bold=True))
         return
@@ -163,6 +197,7 @@ def scanner(packets):
 @click.option('--report-file', default='data/reports/report.txt', help='Path to save the generated report')
 @click.option('--file', default='data/processed/16-09-24_extracted.csv', help='Path to the dataset file')
 @click.option('--read', default=None, help='Read and display an existing report')
+@_require_command_authentication()
 @_require_network_configured()
 def report(report_file, file, read):
     """Generate a report (DEMO)"""
@@ -174,6 +209,13 @@ def report(report_file, file, read):
         except FileNotFoundError:
             click.echo(click.style('Report not found.', fg='red', bold=True))
     else:
+        if not Path(file).exists():
+            click.echo(click.style(f'Report source file not found: {file}', fg='red', bold=True))
+            return
+        if Path(file).suffix.lower() not in SUPPORTED_TRAFFIC_EXTENSIONS:
+            click.echo(click.style('Unsupported file type. Please provide a .csv, .pcap, or .pcapng file.', fg='red', bold=True))
+            return
+
         report = src.generate_report(file, report_file, network)
         saved_report_file = report.attrs.get('report_file') if report is not None else report_file
         saved_report_file_display = str(saved_report_file).replace('\\', '/')
@@ -195,19 +237,12 @@ def network(change, view, create):
         click.echo(click.style('Please choose only one option: --change, --view, or --create', fg='red', bold=True))
         return
     if change:
+        click.echo(click.style('Changing network...', fg='green', bold=True))
         if not _require_command_password():
             return
 
-        click.echo(click.style('Changing network...', fg='green', bold=True))
-        try:
-            with open('config/network.txt', 'r+') as f:
-                content = f.read()
-                f.seek(0)
-                f.truncate()
-                f.write(str(change))
-        except FileNotFoundError:
-            with open('config/network.txt', 'w') as f:
-                f.write(str(change))
+        src.add_to_network(change)
+        _write_current_network(change)
         click.echo(click.style('Network changed! (DEMO)', fg='green', bold=True))
     elif view:
         click.echo(click.style('Viewing all networks... (DEMO)', fg='green', bold=True))
@@ -216,24 +251,24 @@ def network(change, view, create):
             click.echo(click.style(f"- {network.network_name}", fg='green', bold=True))
         click.echo(click.style('All networks displayed! (DEMO)', fg='green', bold=True))
     elif create:
+        click.echo(click.style('Creating new network...', fg='green', bold=True))
         if not _require_command_password():
             return
 
-        click.echo(click.style('Creating new network...', fg='green', bold=True))
         new_network = click.prompt('Enter new network name', default='New_Network')
         src.add_to_network(new_network)
         click.echo(click.style('New network created! (DEMO)', fg='green', bold=True))
     else:
         click.echo(click.style('Current network: (DEMO)', fg='green', bold=True))
-        try:
-            with open('config/network.txt', 'r') as f:
-                content = f.read()
-                click.echo(click.style(content, fg='green', bold=True))
-        except FileNotFoundError:
+        current_network = _read_current_network()
+        if current_network:
+            click.echo(click.style(current_network, fg='green', bold=True))
+        else:
             click.echo(click.style('No network set. (DEMO)', fg='yellow', bold=True))
 
 @cli.command()
 @click.option('--device', default=None, help='Look at a specific device')
+@_require_command_authentication()
 @_require_network_configured()
 def device(device):    
     """View or analyze a specific device (DEMO)"""
@@ -255,21 +290,18 @@ def device(device):
             click.echo(click.style(f"- {device.device_name} ({device.mac_address})", fg='green', bold=True))
 
 @cli.command()
+@_require_command_authentication()
 def clear():
     """Clear all data and reset the application (DEMO)"""
-    if not _require_command_password():
-        return
-
     click.echo(click.style('Clearing all data...', fg='green', bold=True))
-    shutil.rmtree('data/processed', ignore_errors=True)
-    shutil.rmtree('data/raw', ignore_errors=True)
-    shutil.rmtree('data/reports', ignore_errors=True)
-    os.makedirs('data/processed', exist_ok=True)
-    os.makedirs('data/raw', exist_ok=True)
-    os.makedirs('data/reports', exist_ok=True)
+    for directory in DATA_DIRECTORIES:
+        shutil.rmtree(directory, ignore_errors=True)
+    for directory in DATA_DIRECTORIES:
+        os.makedirs(directory, exist_ok=True)
     click.echo(click.style('All data cleared! (DEMO)', fg='green', bold=True))
 
 @cli.command()
+@_require_command_authentication()
 @_require_network_configured()
 def flagged():
     """View flagged devices (DEMO)"""

@@ -4,10 +4,11 @@ import pandas as pd
 from ucimlrepo import fetch_ucirepo 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.preprocessing import LabelEncoder
 import pickle
 import time
+import numpy as np
 
 
 def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_addresses=None):
@@ -25,6 +26,7 @@ def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_ad
             min_samples_split=100,
             min_samples_leaf=50,
             max_features='sqrt',
+            # Use all cores for faster training.
             n_jobs=-1
         )
         clf.fit(X_train, y_train)
@@ -39,9 +41,14 @@ def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_ad
             'importance': clf.feature_importances_
         }).sort_values('importance', ascending=False)
         print(feature_importance.head(10))
-        
-        train_acc = clf.score(X_train, y_train)
-        test_acc = clf.score(X_test, y_test)
+
+        # Avoid a second full pass over the massive training set just for scoring.
+        test_acc = accuracy_score(y_test, y_pred)
+
+        # Estimate train accuracy from a bounded sample to prevent OOM.
+        train_eval_size = min(200000, len(X_train))
+        train_idx = np.random.default_rng(42).choice(len(X_train), size=train_eval_size, replace=False)
+        train_acc = accuracy_score(y_train.iloc[train_idx], clf.predict(X_train.iloc[train_idx]))
         print(f"\nTraining Accuracy: {train_acc:.4f}")
         print(f"Test Accuracy: {test_acc:.4f}")
         
@@ -67,34 +74,51 @@ def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_ad
         })
         
         if mac_addresses is not None:
-            aggregated_results = []
-            for mac in per_packet_results['MAC_Address'].unique():
-                mac_data = per_packet_results[per_packet_results['MAC_Address'] == mac]
-                
-                # Majority voting
-                device_votes = mac_data['Predicted_Device'].value_counts()
-                most_common_device = device_votes.index[0]
-                num_votes = device_votes.iloc[0]
-                
-                # Average confidence
-                winning_predictions = mac_data[mac_data['Predicted_Device'] == most_common_device]
-                avg_confidence = winning_predictions['Confidence'].mean()
-                
-                # Confidence threshold
-                confidence_threshold = 0.6
-                if avg_confidence < confidence_threshold:
-                    most_common_device = 'Unknown'
-                
-                # Aggregated results
-                aggregated_results.append({
-                    'MAC_Address': mac,
-                    'Predicted_Device': most_common_device,
-                    'Confidence': avg_confidence,
-                    'Packet_Count': len(mac_data),
-                    'Vote_Count': num_votes
-                })
-            
-            results = pd.DataFrame(aggregated_results)
+            # Vectorized majority-vote aggregation per MAC for better inference throughput.
+            vote_counts = (
+                per_packet_results
+                .groupby(['MAC_Address', 'Predicted_Device'])
+                .size()
+                .rename('Vote_Count')
+                .reset_index()
+            )
+
+            winners = (
+                vote_counts
+                .sort_values(['MAC_Address', 'Vote_Count', 'Predicted_Device'], ascending=[True, False, True])
+                .drop_duplicates(subset=['MAC_Address'], keep='first')
+            )
+
+            winner_confidence = (
+                per_packet_results
+                .merge(
+                    winners[['MAC_Address', 'Predicted_Device']],
+                    on=['MAC_Address', 'Predicted_Device'],
+                    how='inner',
+                )
+                .groupby(['MAC_Address', 'Predicted_Device'])['Confidence']
+                .mean()
+                .rename('Confidence')
+                .reset_index()
+            )
+
+            packet_counts = (
+                per_packet_results
+                .groupby('MAC_Address')
+                .size()
+                .rename('Packet_Count')
+                .reset_index()
+            )
+
+            results = (
+                winners
+                .merge(winner_confidence, on=['MAC_Address', 'Predicted_Device'], how='left')
+                .merge(packet_counts, on='MAC_Address', how='left')
+            )
+
+            confidence_threshold = 0.6
+            results.loc[results['Confidence'] < confidence_threshold, 'Predicted_Device'] = 'Unknown'
+            results = results[['MAC_Address', 'Predicted_Device', 'Confidence', 'Packet_Count', 'Vote_Count']]
         else:
             results = per_packet_results
         
@@ -116,8 +140,12 @@ def load_model(path):
         model = pickle.load(f)
     with open(path + '_encoder.pkl', 'rb') as f:
         encoder = pickle.load(f)
-    with open(path + '_scaler.pkl', 'rb') as f:
-        scaler = pickle.load(f)
+    scaler_path = path + '_scaler.pkl'
+    if os.path.exists(scaler_path):
+        with open(scaler_path, 'rb') as f:
+            scaler = pickle.load(f)
+    else:
+        scaler = None
     return model, encoder, scaler
 
 
@@ -163,12 +191,18 @@ def encode_data(data, label_encoders=None):
                     # Encoder mapping
                     class_to_idx = {cls: idx for idx, cls in enumerate(le.classes_)}
                     
-                    # Vectorized mapping
-                    # Handle unknowns while keeping the known
                     col_str = data[col].astype(str)
-                    data[col] = col_str.map(
-                        lambda x: class_to_idx.get(x, abs(hash(x)) % 1000000 + num_known_classes)
+                    mapped = col_str.map(class_to_idx)
+
+                    # Deterministic unknown bucket assignment avoids per-row Python lambdas.
+                    unknown_codes = (
+                        pd.util.hash_pandas_object(col_str, index=False)
+                        .astype(np.uint64)
+                        .mod(1000000)
+                        .add(num_known_classes)
+                        .astype(np.int64)
                     )
+                    data[col] = mapped.where(mapped.notna(), unknown_codes).astype(np.int64)
                 else:
                     print(f"No existing encoder for column '{col}', fitting new encoder.")
                     le = LabelEncoder()
@@ -179,30 +213,69 @@ def encode_data(data, label_encoders=None):
 
     return data, label_encoders
 
-def dataset_split(data, target_column=None, scaler=None, drop_cols=['eth.src', 'eth.dst', 'IP.src', 'IP.dst']):
-    """Split dataset when training and scale features."""
+def dataset_split(
+    data,
+    target_column=None,
+    scaler=None,
+    drop_cols=['eth.src', 'eth.dst', 'IP.src', 'IP.dst'],
+    expect_target=True,
+):
+    """Split dataset when training and prepare numeric feature matrix."""
     if target_column is None:
         target_column = 'Device_Type'
-    X = data.drop(columns=target_column)
-    X = X.drop(columns=drop_cols, errors='ignore')
-    Y = data[target_column]
-    
-    if scaler is None:
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
+
+    has_target = target_column in data.columns
+    if expect_target and not has_target:
+        raise KeyError(f"Target column '{target_column}' was not found in dataset.")
+
+    if has_target:
+        X = data.drop(columns=target_column)
+        Y = data[target_column]
     else:
-        X_scaled = scaler.transform(X)
+        X = data.copy()
+        Y = None
+
+    X = X.drop(columns=drop_cols, errors='ignore')
+
+    # Random forest does not require feature scaling; keep backwards compatibility
+    # if an older scaler artifact is present.
+    if scaler is not None:
+        X_prepared = scaler.transform(X)
+        X_prepared = pd.DataFrame(X_prepared, columns=X.columns)
+    else:
+        X_prepared = X
+
+    X_prepared = X_prepared.astype(np.float32)
     
-    X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
-    
-    return X_scaled, Y, scaler
+    return X_prepared, Y, scaler
 
 
-def train_model():
-    """train the random forest model"""
+def train_model(
+    dataset_path='data/processed/16-09-23_extracted.csv',
+    model_path='models/random_forest_model',
+    max_rows=2000000,
+):
+    """Train the random forest model from a processed CSV dataset."""
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    print("Loading datasets...")
-    data = load_datasets('data/processed/16-09-23_extracted.csv')
+    print(f"Loading dataset: {dataset_path}")
+    data = load_datasets(dataset_path)
+
+    if max_rows is not None and len(data) > max_rows:
+        print(f"Dataset has {len(data):,} rows. Sampling down to {max_rows:,} rows for memory-safe training...")
+        if 'Device_Type' in data.columns:
+            data = data.groupby('Device_Type', group_keys=False).apply(
+                lambda group: group.sample(
+                    n=min(len(group), max(1, int(max_rows * (len(group) / len(data))))),
+                    random_state=42,
+                )
+            )
+            if len(data) > max_rows:
+                data = data.sample(n=max_rows, random_state=42)
+        else:
+            data = data.sample(n=max_rows, random_state=42)
+        data = data.reset_index(drop=True)
+        print(f"Sampled training rows: {len(data):,}")
+
     print("Encoding data...")
     data, label_encoders = encode_data(data)
     print("Splitting dataset...")
@@ -210,11 +283,11 @@ def train_model():
     print("Training model...")
     model = random_forest_model(X, 'train', Y)
     print("Saving model...")
-    save_model(model, 'models/random_forest_model', label_encoders, scaler)
+    save_model(model, model_path, label_encoders, scaler)
     print("Model training complete.")
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
-def use_model(file_path='data/processed/16-09-24_extracted.csv', dataset=None):
+def use_model(file_path='data/processed/16-10-12_extracted.csv', dataset=None):
     """use the random forest model"""
     if not os.path.exists('models/random_forest_model.pkl'):
         raise FileNotFoundError("Model file not found. Please train the model first.")
@@ -231,12 +304,13 @@ def use_model(file_path='data/processed/16-09-24_extracted.csv', dataset=None):
     print("encoding data")
     endata, _ = encode_data(data, label_encoders=label_encoders)
     print("prepare data")
-    X, _, _ = dataset_split(endata, 'Device_Type', scaler=scaler)
+    X, _, _ = dataset_split(endata, 'Device_Type', scaler=scaler, expect_target=False)
     print("predicting")
     results = random_forest_model(X, 'use', model=model, label_encoders=label_encoders, mac_addresses=data.get('eth.src'))
     return results
 
 
 if __name__ == "__main__":
-    #train_model()
-    use_model()
+    train_model(dataset_path='data/processed/merged_training_extracted.csv', model_path='models/random_forest_model', max_rows=20000000)
+    #results = use_model()
+    #print(results)
