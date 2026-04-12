@@ -263,7 +263,7 @@ def save_dataframe_to_csv(df, output_path):
     except Exception as e:
         print(f"Error saving DataFrame to CSV: {e}")
 
-def process_pcap(File="16-09-24.pcap", save_to_csv=True):
+def process_pcap(File="16-09-24.pcap", save_to_csv=True, train=False):
     raw_path = "data/raw/"
     processed_path = "data/processed/"
     if os.path.isabs(File) or os.path.exists(File):
@@ -289,9 +289,10 @@ def process_pcap(File="16-09-24.pcap", save_to_csv=True):
         
         df = calculate_advanced_features(df)
         
-        print("Adding device labels...")
-        df = add_lables(df)
-        print("✓ Labels added\n")
+        if train:
+            print("Adding device labels...")
+            df = add_lables(df)
+            print("✓ Labels added\n")
         
         df = clean_data(df)
         
@@ -370,4 +371,4 @@ def process_and_merge_pcaps(
 
 
 if __name__ == "__main__":
-    process_pcap(File='16-09-24.pcap', save_to_csv=True)
+    process_pcap(File='16-09-24.pcap', save_to_csv=True, train=True)

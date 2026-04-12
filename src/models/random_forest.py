@@ -3,6 +3,7 @@ import os
 import pandas as pd
 from ucimlrepo import fetch_ucirepo 
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import LabelEncoder
@@ -11,7 +12,16 @@ import time
 import numpy as np
 
 
-def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_addresses=None):
+def random_forest_model(
+    X,
+    mode,
+    Y=None,
+    model=None,
+    label_encoders=None,
+    mac_addresses=None,
+    confidence_threshold=0.60,
+    margin_threshold=0.10,
+):
     """Device identification using Random Forest Classifier.
     split into training and usage modes."""
     if mode == 'train':
@@ -31,7 +41,11 @@ def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_ad
         )
         clf.fit(X_train, y_train)
 
-        y_pred = clf.predict(X_test)
+        # Calibrate probabilities so confidence values better match true correctness.
+        calibrated_model = CalibratedClassifierCV(clf, method='sigmoid', cv=3)
+        calibrated_model.fit(X_train, y_train)
+
+        y_pred = calibrated_model.predict(X_test)
 
         # report
         print(classification_report(y_test, y_pred))
@@ -48,16 +62,25 @@ def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_ad
         # Estimate train accuracy from a bounded sample to prevent OOM.
         train_eval_size = min(200000, len(X_train))
         train_idx = np.random.default_rng(42).choice(len(X_train), size=train_eval_size, replace=False)
-        train_acc = accuracy_score(y_train.iloc[train_idx], clf.predict(X_train.iloc[train_idx]))
+        train_acc = accuracy_score(y_train.iloc[train_idx], calibrated_model.predict(X_train.iloc[train_idx]))
         print(f"\nTraining Accuracy: {train_acc:.4f}")
         print(f"Test Accuracy: {test_acc:.4f}")
         
-        return clf
+        return calibrated_model
     elif mode == 'use':
         # model
         probabilities = model.predict_proba(X)
-        predicted_encoded = probabilities.argmax(axis=1)
+        class_values = np.asarray(model.classes_)
+        predicted_idx = probabilities.argmax(axis=1)
+        predicted_encoded = class_values[predicted_idx]
         confidences = probabilities.max(axis=1)
+
+        # Top-2 margin is a useful ambiguity signal (small margin => uncertain).
+        if probabilities.shape[1] > 1:
+            top2 = np.partition(probabilities, -2, axis=1)[:, -2:]
+            margins = top2[:, 1] - top2[:, 0]
+        else:
+            margins = np.ones(len(probabilities), dtype=np.float32)
         
         # decode predictions
         device_encoder = label_encoders.get('Device_Type')
@@ -70,11 +93,45 @@ def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_ad
         per_packet_results = pd.DataFrame({
             'MAC_Address': mac_addresses if mac_addresses is not None else range(len(predicted_devices)),
             'Predicted_Device': predicted_devices,
-            'Confidence': confidences
+            'Confidence': confidences,
+            'Margin': margins,
         })
         
         if mac_addresses is not None:
-            # Vectorized majority-vote aggregation per MAC for better inference throughput.
+            # Better MAC-level confidence: average calibrated probabilities per MAC.
+            class_labels = class_values
+            if device_encoder is not None:
+                class_labels = device_encoder.inverse_transform(class_values.astype(int))
+
+            prob_columns = [str(label) for label in class_labels]
+            prob_df = pd.DataFrame(probabilities, columns=prob_columns)
+            prob_df.insert(0, 'MAC_Address', per_packet_results['MAC_Address'].values)
+
+            mean_probs = prob_df.groupby('MAC_Address', as_index=False).mean()
+            mean_prob_values = mean_probs[prob_columns].to_numpy()
+
+            winner_idx = mean_prob_values.argmax(axis=1)
+            winning_conf = mean_prob_values[np.arange(len(mean_probs)), winner_idx]
+
+            if mean_prob_values.shape[1] > 1:
+                mac_top2 = np.partition(mean_prob_values, -2, axis=1)[:, -2:]
+                mac_margins = mac_top2[:, 1] - mac_top2[:, 0]
+            else:
+                mac_margins = np.ones(len(mean_probs), dtype=np.float32)
+
+            predicted_mac_device = np.asarray(prob_columns, dtype=object)[winner_idx]
+
+            packet_counts = per_packet_results.groupby('MAC_Address').size().rename('Packet_Count')
+
+            results = pd.DataFrame({
+                'MAC_Address': mean_probs['MAC_Address'].values,
+                'Predicted_Device': predicted_mac_device,
+                'Confidence': winning_conf,
+                'Margin': mac_margins,
+            })
+            results = results.merge(packet_counts.reset_index(), on='MAC_Address', how='left')
+
+            # Keep Vote_Count for compatibility with existing outputs.
             vote_counts = (
                 per_packet_results
                 .groupby(['MAC_Address', 'Predicted_Device'])
@@ -82,44 +139,19 @@ def random_forest_model(X, mode, Y=None, model=None, label_encoders=None, mac_ad
                 .rename('Vote_Count')
                 .reset_index()
             )
-
-            winners = (
-                vote_counts
-                .sort_values(['MAC_Address', 'Vote_Count', 'Predicted_Device'], ascending=[True, False, True])
-                .drop_duplicates(subset=['MAC_Address'], keep='first')
+            results = results.merge(
+                vote_counts,
+                on=['MAC_Address', 'Predicted_Device'],
+                how='left',
             )
+            results['Vote_Count'] = results['Vote_Count'].fillna(0).astype(int)
 
-            winner_confidence = (
-                per_packet_results
-                .merge(
-                    winners[['MAC_Address', 'Predicted_Device']],
-                    on=['MAC_Address', 'Predicted_Device'],
-                    how='inner',
-                )
-                .groupby(['MAC_Address', 'Predicted_Device'])['Confidence']
-                .mean()
-                .rename('Confidence')
-                .reset_index()
-            )
-
-            packet_counts = (
-                per_packet_results
-                .groupby('MAC_Address')
-                .size()
-                .rename('Packet_Count')
-                .reset_index()
-            )
-
-            results = (
-                winners
-                .merge(winner_confidence, on=['MAC_Address', 'Predicted_Device'], how='left')
-                .merge(packet_counts, on='MAC_Address', how='left')
-            )
-
-            confidence_threshold = 0.6
-            results.loc[results['Confidence'] < confidence_threshold, 'Predicted_Device'] = 'Unknown'
-            results = results[['MAC_Address', 'Predicted_Device', 'Confidence', 'Packet_Count', 'Vote_Count']]
+            low_conf_mask = (results['Confidence'] < confidence_threshold) | (results['Margin'] < margin_threshold)
+            results.loc[low_conf_mask, 'Predicted_Device'] = 'Unknown'
+            results = results[['MAC_Address', 'Predicted_Device', 'Confidence', 'Packet_Count', 'Vote_Count', 'Margin']]
         else:
+            low_conf_mask = (per_packet_results['Confidence'] < confidence_threshold) | (per_packet_results['Margin'] < margin_threshold)
+            per_packet_results.loc[low_conf_mask, 'Predicted_Device'] = 'Unknown'
             results = per_packet_results
         
         return results
@@ -287,7 +319,12 @@ def train_model(
     print("Model training complete.")
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
-def use_model(file_path='data/processed/16-10-12_extracted.csv', dataset=None):
+def use_model(
+    file_path='data/processed/16-10-12_extracted.csv',
+    dataset=None,
+    confidence_threshold=0.60,
+    margin_threshold=0.10,
+):
     """use the random forest model"""
     if not os.path.exists('models/random_forest_model.pkl'):
         raise FileNotFoundError("Model file not found. Please train the model first.")
@@ -306,11 +343,19 @@ def use_model(file_path='data/processed/16-10-12_extracted.csv', dataset=None):
     print("prepare data")
     X, _, _ = dataset_split(endata, 'Device_Type', scaler=scaler, expect_target=False)
     print("predicting")
-    results = random_forest_model(X, 'use', model=model, label_encoders=label_encoders, mac_addresses=data.get('eth.src'))
+    results = random_forest_model(
+        X,
+        'use',
+        model=model,
+        label_encoders=label_encoders,
+        mac_addresses=data.get('eth.src'),
+        confidence_threshold=confidence_threshold,
+        margin_threshold=margin_threshold,
+    )
     return results
 
 
 if __name__ == "__main__":
-    train_model(dataset_path='data/processed/merged_training_extracted.csv', model_path='models/random_forest_model', max_rows=20000000)
-    #results = use_model()
-    #print(results)
+    #train_model(dataset_path='data/processed/merged_training_extracted.csv', model_path='models/random_forest_model', max_rows=20000000)
+    results = use_model()
+    print(results)
