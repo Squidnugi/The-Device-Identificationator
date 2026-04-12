@@ -19,8 +19,8 @@ def random_forest_model(
     model=None,
     label_encoders=None,
     mac_addresses=None,
-    confidence_threshold=0.60,
-    margin_threshold=0.10,
+    confidence_threshold=0.70,
+    margin_threshold=0.12,
 ):
     """Device identification using Random Forest Classifier.
     split into training and usage modes."""
@@ -322,8 +322,8 @@ def train_model(
 def use_model(
     file_path='data/processed/16-10-12_extracted.csv',
     dataset=None,
-    confidence_threshold=0.60,
-    margin_threshold=0.10,
+    confidence_threshold=0.70,
+    margin_threshold=0.12,
 ):
     """use the random forest model"""
     if not os.path.exists('models/random_forest_model.pkl'):
