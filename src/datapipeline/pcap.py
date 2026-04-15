@@ -98,12 +98,14 @@ def pcap_to_dataframe(pcap_path):
                             packet_info['Is_DNS'] = 1
                             dnsqr = pkt[DNSQR]
                             packet_info['DNS_Query'] = dnsqr.qname.decode() if isinstance(dnsqr.qname, bytes) else str(dnsqr.qname)
-                    except:
+                    except Exception as e:
+                        print(f"Error extracting DNS query: {e}")
                         pass
                 
                 packets_data.append(packet_info)
                 
             except Exception as e:
+                print(f"Error processing packet: {e}")
                 continue
     
     except FileNotFoundError:
@@ -115,8 +117,8 @@ def pcap_to_dataframe(pcap_path):
                 try:
                     size_mb = os.path.getsize(f'data/raw/{f}') / (1024*1024)
                     print(f"  - {f} ({size_mb:.1f} MB)")
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Error getting size for {f}: {e}")
         return pd.DataFrame()
     except Exception as e:
         print(f"Error reading PCAP file: {e}")
@@ -129,9 +131,9 @@ def pcap_to_dataframe(pcap_path):
         print(f"\n✓ Successfully extracted {len(df):,} packets from {pcap_path}\n")
     return df
 
-def add_lables(data):
+def add_labels(data):
     """Add device type labels based on MAC addresses for model training."""
-    lables = {'Smart Home':['d0:52:a8:00:67:5e'],
+    labels = {'Smart Home':['d0:52:a8:00:67:5e'],
               'Assistant':['44:65:0d:56:cc:d3'],
               'Security Camera':['70:ee:50:18:34:43','f4:f2:6d:93:51:f1','00:16:6c:ab:6b:88','30:8c:fb:2f:e4:b2','00:62:6e:51:27:2e','e8:ab:fa:19:de:4f','30:8c:fb:b6:e4:b5'],
               'Baby Monitor':['00:24:e4:11:18:a8'],
@@ -149,7 +151,7 @@ def add_lables(data):
               'Router':['14:cc:20:51:33:ea'],
               'Apple':['f4:5c:89:93:cc:85']}
     data['Device_Type'] = None
-    for device_type, mac_addresses in lables.items():
+    for device_type, mac_addresses in labels.items():
         for mac in mac_addresses:
             data.loc[data['eth.src'] == mac, 'Device_Type'] = device_type
     return data
@@ -291,7 +293,7 @@ def process_pcap(File="16-09-24.pcap", save_to_csv=True, train=False):
         
         if train:
             print("Adding device labels...")
-            df = add_lables(df)
+            df = add_labels(df)
             print("✓ Labels added\n")
         
         df = clean_data(df)

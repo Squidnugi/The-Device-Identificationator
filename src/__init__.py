@@ -5,7 +5,7 @@ from .report import generate_report
 from .tui import DashboardApp, run_app
 
 __version__ = "0.1.0"
-__author__ = "Your Name"
+__author__ = "Henry McConville"
 
 # Import main classes/functions for easier access
 # from .module_name import ClassName, function_name

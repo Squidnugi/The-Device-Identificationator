@@ -35,7 +35,6 @@ def get_db():
 def create_all_tables():
     """Create all tables in the database"""
     Base.metadata.create_all(bind=engine)
-    _migrate_devices_to_network_scoped_mac_uniqueness()
 
 
 def drop_all_tables():
@@ -48,55 +47,6 @@ def reset_database():
     drop_all_tables()
     create_all_tables()
 
-
-def _migrate_devices_to_network_scoped_mac_uniqueness():
-    """Migrate legacy devices uniqueness from mac_address -> (mac_address, Network_id)."""
-    try:
-        with engine.connect() as conn:
-            table_info = conn.exec_driver_sql(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'"
-            ).fetchone()
-            if not table_info or not table_info[0]:
-                return
-
-            create_sql = table_info[0]
-            has_legacy_unique = "UNIQUE (mac_address)" in create_sql
-            already_network_scoped = "UNIQUE (mac_address, Network_id)" in create_sql
-
-            if not has_legacy_unique or already_network_scoped:
-                return
-
-        with engine.begin() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
-            conn.exec_driver_sql(
-                """
-                CREATE TABLE devices_new (
-                    id INTEGER NOT NULL,
-                    device_name VARCHAR NOT NULL,
-                    device_type VARCHAR NOT NULL,
-                    mac_address VARCHAR NOT NULL,
-                    ip_address VARCHAR,
-                    confidence FLOAT,
-                    Network_id INTEGER NOT NULL,
-                    PRIMARY KEY (id),
-                    UNIQUE (mac_address, Network_id),
-                    FOREIGN KEY(Network_id) REFERENCES networks (id)
-                )
-                """
-            )
-            conn.exec_driver_sql(
-                """
-                INSERT INTO devices_new (id, device_name, device_type, mac_address, ip_address, confidence, Network_id)
-                SELECT id, device_name, device_type, mac_address, ip_address, confidence, Network_id FROM devices
-                """
-            )
-            conn.exec_driver_sql("DROP TABLE devices")
-            conn.exec_driver_sql("ALTER TABLE devices_new RENAME TO devices")
-            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_devices_id ON devices (id)")
-            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_devices_device_name ON devices (device_name)")
-            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
-    except Exception as e:
-        print(f"Warning: devices table uniqueness migration skipped: {e}")
 
 def _add_model_instance(db, model_instance):
     """Add a SQLAlchemy model instance to the database."""
@@ -164,7 +114,6 @@ def add_to_network(network_name):
 
 def add_device(devices, network):
     """Add or update devices for a network and return persistence stats."""
-    _migrate_devices_to_network_scoped_mac_uniqueness()
     db = SessionLocal()
     stats = {"inserted": 0, "updated": 0, "skipped": 0}
 
@@ -183,22 +132,38 @@ def add_device(devices, network):
             stats["skipped"] += 1
             continue
 
+        incoming_confidence = i.get('Confidence')
+        try:
+            incoming_confidence = float(incoming_confidence) if incoming_confidence is not None else None
+            if incoming_confidence != incoming_confidence:  # NaN check
+                incoming_confidence = None
+        except (TypeError, ValueError):
+            incoming_confidence = None
+
         try:
             existing = db.query(Device).filter_by(mac_address=mac, Network_id=network_id).first()
             if existing:
-                existing.device_name = i.get('Predicted_Device') or existing.device_name
-                existing.device_type = i.get('Predicted_Device') or existing.device_type
-                existing.ip_address = i.get('IP_Address') or existing.ip_address
-                existing.confidence = i.get('Confidence')
-                db.commit()
-                stats["updated"] += 1
+                should_replace = (
+                    incoming_confidence is not None
+                    and (existing.confidence is None or incoming_confidence > existing.confidence)
+                )
+
+                if should_replace:
+                    existing.device_name = i.get('Predicted_Device') or existing.device_name
+                    existing.device_type = i.get('Predicted_Device') or existing.device_type
+                    existing.ip_address = i.get('IP_Address') or existing.ip_address
+                    existing.confidence = incoming_confidence
+                    db.commit()
+                    stats["updated"] += 1
+                else:
+                    stats["skipped"] += 1
             else:
                 device = Device(
                     device_name=i.get('Predicted_Device') or 'Unknown',
                     device_type=i.get('Predicted_Device') or 'Unknown',
                     mac_address=mac,
                     ip_address=i.get('IP_Address'),
-                    confidence=i.get('Confidence'),
+                    confidence=incoming_confidence,
                     Network_id=network_id
                 )
                 _add_model_instance(db, device)
@@ -234,7 +199,7 @@ def all_networks():
 # ============================================================================
 
 class Device(Base):
-    """Example Device model"""
+    """Device model"""
     __tablename__ = "devices"
     __table_args__ = (
         UniqueConstraint("mac_address", "Network_id", name="uq_devices_mac_network"),
@@ -255,7 +220,7 @@ class Device(Base):
 
 
 class Network(Base):
-    """Example Network model"""
+    """Network model"""
     __tablename__ = "networks"
 
     id = Column(Integer, primary_key=True, index=True)

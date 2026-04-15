@@ -120,7 +120,7 @@ def generate_report(traffic_file, report_file, network=None):
                 device_type = getattr(device, 'device_type', 'Unknown') or 'Unknown'
                 confidence = round(float(getattr(device, 'confidence', 0.0) or 0.0), 4)
                 # Still flag if confidence is low even for known devices
-                flagged = confidence < 0.6 or device_type.lower() == 'unknown'
+                flagged = confidence < 0.7 or device_type.lower() == 'unknown'
                 foreign = False
             else:
                 # MAC not in database — foreign/unknown device

@@ -1,7 +1,6 @@
 import os
 
 import pandas as pd
-from ucimlrepo import fetch_ucirepo 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import train_test_split
@@ -249,10 +248,12 @@ def dataset_split(
     data,
     target_column=None,
     scaler=None,
-    drop_cols=['eth.src', 'eth.dst', 'IP.src', 'IP.dst'],
+    drop_cols=None,
     expect_target=True,
 ):
     """Split dataset when training and prepare numeric feature matrix."""
+    if drop_cols is None:
+        drop_cols = ['eth.src', 'eth.dst', 'IP.src', 'IP.dst']
     if target_column is None:
         target_column = 'Device_Type'
 

@@ -26,7 +26,7 @@ def _write_current_network(network_name: str) -> None:
     NETWORK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     NETWORK_CONFIG_PATH.write_text(str(network_name).strip(), encoding="utf-8")
 
-def _require_command_password():
+def _require_command_password() -> bool:
     """Prompt for the command password and validate it."""
     if not src.is_password_set():
         click.echo(click.style('No command password is configured yet.', fg='yellow', bold=True))
@@ -40,7 +40,7 @@ def _require_command_password():
     return True
 
 
-def _require_command_authentication():
+def _require_command_authentication() -> callable:
     """Decorator that enforces command-password authentication."""
     def decorator(func):
         @wraps(func)
@@ -54,7 +54,7 @@ def _require_command_authentication():
 
     return decorator
 
-def _require_network_configured():      
+def _require_network_configured() -> callable:
     """Decorator that checks if a network is configured in network.txt"""
     def decorator(func):
         @wraps(func)
@@ -69,12 +69,12 @@ def _require_network_configured():
         return wrapper
     return decorator
 
-def grab_network():
+def grab_network() -> str | None:
     """Helper function to grab the current network from network.txt"""
     return _read_current_network()
 
 
-def _echo_colored_report(report_text):
+def _echo_colored_report(report_text) -> None:
     """Render text report output with unknown device rows highlighted in red."""
     if not report_text or not str(report_text).strip():
         click.echo(click.style('No devices found for this network in the report.', fg='yellow', bold=True))
@@ -146,9 +146,11 @@ def setup(change):
 
 @cli.command()
 @click.option('--file', default='data/processed/16-09-24_extracted.csv', help='Path to the dataset file')
+@click.option('--confidence-threshold', default=0.60, show_default=True, type=click.FloatRange(0.0, 1.0), help='Minimum confidence required before classifying a device.')
+@click.option('--margin-threshold', default=0.10, show_default=True, type=click.FloatRange(0.0, 1.0), help='Minimum top-1 vs top-2 probability margin required before classifying a device.')
 @_require_command_authentication()
 @_require_network_configured()
-def identifier(file):
+def identifier(file, confidence_threshold, margin_threshold):
     """Run device identification analysis (DEMO)"""
     source_path = Path(file)
     if not source_path.exists():
@@ -167,7 +169,12 @@ def identifier(file):
         click.echo(click.style('Processing pcap file...', fg='green', bold=True))
         data = src.process_pcap(file, save_to_csv=False)
 
-    results = src.use_model(file_path=file, dataset=data)
+    results = src.use_model(
+        file_path=file,
+        dataset=data,
+        confidence_threshold=confidence_threshold,
+        margin_threshold=margin_threshold,
+    )
     click.echo(click.style('Analysis complete! (DEMO)', fg='green', bold=True))
     click.echo(click.style(results.to_string(), fg='green', bold=True))
     network = grab_network()
@@ -308,7 +315,7 @@ def flagged():
     click.echo(click.style('Viewing flagged devices...', fg='green', bold=True))
     devices = src.get_devices_by_network(grab_network())
     for device in devices:
-        if device.confidence < 0.6:  # Example threshold
+        if device.confidence < 0.7:
             click.echo(click.style(f"- {device.device_name} ({device.mac_address})", fg='red', bold=True))
 
     click.echo(click.style('Flagged devices displayed! (DEMO)', fg='green', bold=True))

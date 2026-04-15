@@ -4,7 +4,12 @@ matplotlib
 scikit-learn
 pytest
 sqlalchemy
-pickle
 scapy
-psutil
+bcrypt
+click
+textual
+rich
+tpdm
+scipy
+uncimlrepo
 bcrypt
