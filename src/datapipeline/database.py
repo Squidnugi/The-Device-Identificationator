@@ -102,15 +102,24 @@ def delete_data(db, model, filters):
     
 
 def add_to_network(network_name):
-    """Add a new network to the database"""
+    """Create or retrieve a network record by name.
+
+    Parameters
+    ----------
+    network_name : str
+        Name of the network to create or look up.
+
+    Returns
+    -------
+    tuple[Network, bool]
+        The Network instance and a boolean that is True when newly created.
+    """
+    db = SessionLocal()
     try:
-        db = SessionLocal()
         network, created = get_or_create(db, Network, network_name=network_name)
-        db.close()
         return network, created
-    except Exception as e:
-        print(f"Error adding network: {e}")
-        return None, False
+    finally:
+        db.close()
 
 def add_device(devices, network):
     """Add or update devices for a network and return persistence stats."""
@@ -211,8 +220,6 @@ class Device(Base):
     mac_address = Column(String, nullable=False)
     ip_address = Column(String)
     confidence = Column(Float)
-    #packet_count = Column(Integer)
-    #vote_count = Column(Integer)
     Network_id = Column(Integer, ForeignKey("networks.id"), nullable=False)
 
     # Relationship

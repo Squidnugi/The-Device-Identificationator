@@ -1,3 +1,4 @@
+"""Textual TUI application for The Device Identificationator."""
 from __future__ import annotations
 
 import asyncio
@@ -25,25 +26,26 @@ if __package__ in (None, ""):
     from src.report import generate_report
     from src.security import is_password_set, set_password, verify_password
     from src.tui.dashboard import DashboardScreen
+    from src.config import DATA_DIRECTORIES, NETWORK_CONFIG_PATH
 else:
     from ..datapipeline import add_device, add_to_network, all_networks, capture_and_process_packets, create_all_tables, get_devices_by_network, process_pcap
     from ..models import use_model
     from ..report import generate_report
     from ..security import is_password_set, set_password, verify_password
     from .dashboard import DashboardScreen
+    from ..config import DATA_DIRECTORIES, NETWORK_CONFIG_PATH
 
 
 # -----------------------------------------------------------------------------
 # Configuration constants
 # -----------------------------------------------------------------------------
-NETWORK_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "network.txt"
 CREATE_NETWORK_OPTION = "+ Create new network..."
 DEFAULT_CLASSIFICATION_FILE = "data/processed/16-09-24_extracted.csv"
 DEFAULT_REPORT_INPUT = "data/processed/16-09-24_extracted.csv"
 DEFAULT_REPORT_OUTPUT = "data/reports/report.txt"
 STATUS_STEP_DELAY_SECONDS = 0.15
 DEFAULT_CAPTURE_PACKET_COUNT = 100
-DATA_DIRECTORIES = ("data/processed", "data/raw", "data/reports")
+LOW_CONFIDENCE_DISPLAY_THRESHOLD = 0.7
 
 
 # -----------------------------------------------------------------------------
@@ -548,7 +550,7 @@ class App(TextualApp):
                 except (ValueError, TypeError):
                     conf_str = str(device.confidence)
 
-                row_style = "red" if confidence_value is not None and confidence_value < 0.6 else ""
+                row_style = "red" if confidence_value is not None and confidence_value < LOW_CONFIDENCE_DISPLAY_THRESHOLD else ""
 
                 table.add_row(
                     device.device_name or "—",
@@ -577,7 +579,7 @@ class App(TextualApp):
                 confidence = float(device.confidence or 0)
             except (TypeError, ValueError):
                 confidence = 0.0
-            if confidence < 0.6:
+            if confidence < LOW_CONFIDENCE_DISPLAY_THRESHOLD:
                 flagged_devices.append((device, confidence))
 
         if not flagged_devices:
