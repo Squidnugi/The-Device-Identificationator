@@ -26,14 +26,14 @@ if __package__ in (None, ""):
     from src.report import generate_report
     from src.security import is_password_set, set_password, verify_password
     from src.tui.dashboard import DashboardScreen
-    from src.config import DATA_DIRECTORIES, NETWORK_CONFIG_PATH
+    from src.config import DATA_DIRECTORIES, NETWORK_CONFIG_PATH, DEFAULT_CONFIDENCE_THRESHOLD
 else:
     from ..datapipeline import add_device, add_to_network, all_networks, capture_and_process_packets, create_all_tables, get_devices_by_network, process_pcap
     from ..models import use_model
     from ..report import generate_report
     from ..security import is_password_set, set_password, verify_password
     from .dashboard import DashboardScreen
-    from ..config import DATA_DIRECTORIES, NETWORK_CONFIG_PATH
+    from ..config import DATA_DIRECTORIES, NETWORK_CONFIG_PATH, DEFAULT_CONFIDENCE_THRESHOLD
 
 
 # -----------------------------------------------------------------------------
@@ -43,7 +43,6 @@ CREATE_NETWORK_OPTION = "+ Create new network..."
 DEFAULT_REPORT_OUTPUT = "data/reports/report.txt"
 STATUS_STEP_DELAY_SECONDS = 0.15
 DEFAULT_CAPTURE_PACKET_COUNT = 100
-LOW_CONFIDENCE_DISPLAY_THRESHOLD = 0.7
 
 
 # -----------------------------------------------------------------------------
@@ -546,7 +545,7 @@ class App(TextualApp):
                 except (ValueError, TypeError):
                     conf_str = str(device.confidence)
 
-                row_style = "red" if confidence_value is not None and confidence_value < LOW_CONFIDENCE_DISPLAY_THRESHOLD else ""
+                row_style = "red" if confidence_value is not None and confidence_value < DEFAULT_CONFIDENCE_THRESHOLD else ""
 
                 table.add_row(
                     device.device_name or "—",
@@ -575,7 +574,7 @@ class App(TextualApp):
                 confidence = float(device.confidence or 0)
             except (TypeError, ValueError):
                 confidence = 0.0
-            if confidence < LOW_CONFIDENCE_DISPLAY_THRESHOLD:
+            if confidence < DEFAULT_CONFIDENCE_THRESHOLD:
                 flagged_devices.append((device, confidence))
 
         if not flagged_devices:

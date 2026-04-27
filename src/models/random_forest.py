@@ -223,19 +223,17 @@ def _predict_devices(
     return results
 
 
-def save_model(model, path, encoder, scaler):
-    """Save model, encoder, and scaler to disk as pickle files.
+def save_model(model, path, encoder):
+    """Save model and encoder to disk as pickle files.
 
     Parameters
     ----------
     model : estimator
         Fitted classifier to persist.
     path : str
-        Filesystem path prefix; three files are written with .pkl suffixes.
+        Filesystem path prefix; two files are written with .pkl suffixes.
     encoder : dict
         LabelEncoder mapping returned by ``encode_data``.
-    scaler : object or None
-        Fitted scaler, or None if no scaling was applied.
 
     Returns
     -------
@@ -247,15 +245,13 @@ def save_model(model, path, encoder, scaler):
             pickle.dump(model, file_handle)
         with open(path + "_encoder.pkl", "wb") as file_handle:
             pickle.dump(encoder, file_handle)
-        with open(path + "_scaler.pkl", "wb") as file_handle:
-            pickle.dump(scaler, file_handle)
     except OSError as exc:
         raise OSError(f"Failed to save model artifacts to '{path}': {exc}") from exc
     return model, encoder
 
 
 def load_model(path):
-    """Load model, encoder, and optional scaler from disk.
+    """Load model and encoder from disk.
 
     Parameters
     ----------
@@ -264,8 +260,8 @@ def load_model(path):
 
     Returns
     -------
-    tuple[estimator, dict, object or None]
-        Fitted model, label-encoder mapping, and scaler (None if absent).
+    tuple[estimator, dict]
+        Fitted model and label-encoder mapping.
     """
     try:
         with open(path + ".pkl", "rb") as file_handle:
@@ -275,16 +271,7 @@ def load_model(path):
     except OSError as exc:
         raise OSError(f"Failed to load model artifacts from '{path}': {exc}") from exc
 
-    scaler_path = path + "_scaler.pkl"
-    scaler = None
-    if os.path.exists(scaler_path):
-        try:
-            with open(scaler_path, "rb") as file_handle:
-                scaler = pickle.load(file_handle)
-        except OSError as exc:
-            raise OSError(f"Failed to load scaler from '{scaler_path}': {exc}") from exc
-
-    return model, encoder, scaler
+    return model, encoder
 
 
 def encode_data(data, label_encoders=None):
@@ -354,7 +341,6 @@ def encode_data(data, label_encoders=None):
 def dataset_split(
     data,
     target_column=None,
-    scaler=None,
     drop_cols=None,
     expect_target=True,
 ):
@@ -366,9 +352,6 @@ def dataset_split(
         Encoded dataset.
     target_column : str or None
         Name of the label column; defaults to ``'Device_Type'``.
-    scaler : object or None
-        Pre-fitted scaler to apply; Random Forest does not require scaling but
-        older saved artifacts may include one.
     drop_cols : list or None
         Columns to remove before returning features; defaults to MAC/IP cols.
     expect_target : bool
@@ -376,8 +359,8 @@ def dataset_split(
 
     Returns
     -------
-    tuple[pd.DataFrame, pd.Series or None, object or None]
-        Feature matrix, label vector (or None), and the scaler (unchanged).
+    tuple[pd.DataFrame, pd.Series or None]
+        Feature matrix and label vector (or None).
     """
     if drop_cols is None:
         drop_cols = ["eth.src", "eth.dst", "IP.src", "IP.dst"]
@@ -396,14 +379,9 @@ def dataset_split(
         labels = None
 
     features = features.drop(columns=drop_cols, errors="ignore")
-
-    if scaler is not None:
-        features_array = scaler.transform(features)
-        features = pd.DataFrame(features_array, columns=features.columns)
-
     features = features.astype(np.float32)
 
-    return features, labels, scaler
+    return features, labels
 
 
 def train_model(
@@ -446,11 +424,11 @@ def train_model(
     print("Encoding data...")
     data, label_encoders = encode_data(data)
     print("Splitting dataset...")
-    features, labels, scaler = dataset_split(data, "Device_Type")
+    features, labels = dataset_split(data, target_column="Device_Type")
     print("Training model...")
     model = _train_classifier(features, labels)
     print("Saving model...")
-    save_model(model, model_path, label_encoders, scaler)
+    save_model(model, model_path, label_encoders)
     print("Model training complete.")
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
@@ -495,11 +473,11 @@ def use_model(
         data = load_datasets(file_path)
 
     print("Loading model.")
-    model, label_encoders, scaler = load_model(DEFAULT_MODEL_PATH)
+    model, label_encoders = load_model(DEFAULT_MODEL_PATH)
     print("Encoding data.")
     encoded_data, _ = encode_data(data, label_encoders=label_encoders)
     print("Preparing features.")
-    features, _, _ = dataset_split(encoded_data, "Device_Type", scaler=scaler, expect_target=False)
+    features, _ = dataset_split(encoded_data, "Device_Type", expect_target=False)
     print("Running predictions.")
     results = _predict_devices(
         features,
