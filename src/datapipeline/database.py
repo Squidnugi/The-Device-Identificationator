@@ -1,55 +1,110 @@
-"""
-SQLAlchemy Database Configuration and Models for SQLite
-"""
+"""SQLAlchemy database configuration, ORM models, and CRUD helpers for SQLite."""
+import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.exc import IntegrityError
 
-# Database configuration
-DATABASE_URL = "sqlite:///./database.db"  # SQLite database file
-# For different location: DATABASE_URL = "sqlite:////absolute/path/to/database.db"
+DATABASE_URL = "sqlite:///./database.db"
 
-# Create engine
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},  # Required for SQLite
-    echo=False  # Set to True to see SQL queries
+    connect_args={"check_same_thread": False},
+    echo=False,
 )
 
-# Create base class for models
 Base = declarative_base()
 
-# Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def get_db():
-    """Get database session"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# ============================================================================
+# Models
+# ============================================================================
 
+class Device(Base):
+    """ORM model representing a network device stored in the database."""
+
+    __tablename__ = "devices"
+    __table_args__ = (
+        UniqueConstraint("mac_address", "network_id", name="uq_devices_mac_network"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_name = Column(String, index=True, nullable=False)
+    device_type = Column(String, nullable=False)
+    mac_address = Column(String, nullable=False)
+    ip_address = Column(String)
+    confidence = Column(Float)
+    network_id = Column(Integer, ForeignKey("networks.id"), nullable=False)
+
+    network = relationship("Network", back_populates="devices")
+
+
+class Network(Base):
+    """ORM model representing a named network that groups devices."""
+
+    __tablename__ = "networks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    network_name = Column(String, unique=True, index=True, nullable=False)
+
+    devices = relationship("Device", back_populates="network")
+
+
+# ============================================================================
+# Session helpers
+# ============================================================================
 
 def create_all_tables():
-    """Create all tables in the database"""
+    """Create all ORM-mapped tables in the database if they do not already exist."""
     Base.metadata.create_all(bind=engine)
 
 
 def drop_all_tables():
-    """Drop all tables from the database (WARNING: destructive)"""
+    """Drop all ORM-mapped tables from the database.
+
+    Warning
+    -------
+    This is a destructive operation — all data will be permanently deleted.
+    """
     Base.metadata.drop_all(bind=engine)
 
 
 def reset_database():
-    """Reset the database by dropping and recreating all tables (WARNING: destructive)"""
+    """Drop and recreate all tables, wiping all stored data.
+
+    Warning
+    -------
+    This is a destructive operation — all data will be permanently deleted.
+    """
     drop_all_tables()
     create_all_tables()
 
 
+# ============================================================================
+# Low-level CRUD utilities
+# ============================================================================
+
 def _add_model_instance(db, model_instance):
-    """Add a SQLAlchemy model instance to the database."""
+    """Persist a new SQLAlchemy model instance and refresh it from the database.
+
+    Parameters
+    ----------
+    db : Session
+        Active SQLAlchemy session.
+    model_instance : Base
+        Unsaved ORM instance to add.
+
+    Returns
+    -------
+    Base
+        The same instance after commit and refresh (primary key populated).
+
+    Raises
+    ------
+    IntegrityError
+        If a unique constraint is violated.
+    """
     try:
         db.add(model_instance)
         db.commit()
@@ -61,7 +116,24 @@ def _add_model_instance(db, model_instance):
 
 
 def get_or_create(db, model, defaults=None, **lookup):
-    """Get an existing row by lookup fields, or create it if missing."""
+    """Fetch a row matching *lookup* fields, or create it if none exists.
+
+    Parameters
+    ----------
+    db : Session
+        Active SQLAlchemy session.
+    model : type
+        SQLAlchemy ORM model class to query.
+    defaults : dict or None
+        Extra field values applied only when creating a new row.
+    **lookup
+        Column=value pairs used as the lookup filter.
+
+    Returns
+    -------
+    tuple[Base, bool]
+        The existing or newly created instance, and True when newly created.
+    """
     instance = db.query(model).filter_by(**lookup).first()
     if instance:
         return instance, False
@@ -81,25 +153,69 @@ def get_or_create(db, model, defaults=None, **lookup):
             raise
         return instance, False
 
+
 def get_data(db, model, filters=None):
-    """Query data from the database with optional filters"""
+    """Query all rows of *model*, optionally filtered by keyword arguments.
+
+    Parameters
+    ----------
+    db : Session
+        Active SQLAlchemy session.
+    model : type
+        SQLAlchemy ORM model class to query.
+    filters : dict or None
+        Column=value pairs passed to ``filter_by``; None returns all rows.
+
+    Returns
+    -------
+    list[Base]
+        All matching ORM instances.
+    """
     query = db.query(model)
     if filters:
         query = query.filter_by(**filters)
     return query.all()
 
+
 def update_data(db, model, filters, updates):
-    """Update records in the database based on filters"""
+    """Update rows in *model* that match *filters* with the given *updates*.
+
+    Parameters
+    ----------
+    db : Session
+        Active SQLAlchemy session.
+    model : type
+        SQLAlchemy ORM model class to update.
+    filters : dict
+        Column=value pairs identifying rows to update.
+    updates : dict
+        Column=value pairs to apply to matching rows.
+    """
     query = db.query(model).filter_by(**filters)
     query.update(updates)
     db.commit()
-    
+
+
 def delete_data(db, model, filters):
-    """Delete records from the database based on filters"""
+    """Delete rows from *model* that match *filters*.
+
+    Parameters
+    ----------
+    db : Session
+        Active SQLAlchemy session.
+    model : type
+        SQLAlchemy ORM model class to delete from.
+    filters : dict
+        Column=value pairs identifying rows to delete.
+    """
     query = db.query(model).filter_by(**filters)
     query.delete()
     db.commit()
-    
+
+
+# ============================================================================
+# Domain operations
+# ============================================================================
 
 def add_to_network(network_name):
     """Create or retrieve a network record by name.
@@ -112,7 +228,7 @@ def add_to_network(network_name):
     Returns
     -------
     tuple[Network, bool]
-        The Network instance and a boolean that is True when newly created.
+        The Network instance and True when newly created.
     """
     db = SessionLocal()
     try:
@@ -121,8 +237,32 @@ def add_to_network(network_name):
     finally:
         db.close()
 
+
 def add_device(devices, network):
-    """Add or update devices for a network and return persistence stats."""
+    """Add or update devices for a network, skipping lower-confidence duplicates.
+
+    Each device row is compared against any existing record for the same MAC and
+    network. The stored record is updated only when the incoming confidence is
+    strictly higher than the stored value.
+
+    Parameters
+    ----------
+    devices : pd.DataFrame
+        Prediction results with columns: MAC_Address, Predicted_Device,
+        Confidence, and optionally IP_Address.
+    network : str or Network
+        Network name string or an existing Network ORM instance.
+
+    Returns
+    -------
+    dict
+        Counts of ``inserted``, ``updated``, and ``skipped`` rows.
+
+    Raises
+    ------
+    ValueError
+        If the specified network does not exist and cannot be resolved.
+    """
     db = SessionLocal()
     stats = {"inserted": 0, "updated": 0, "skipped": 0}
 
@@ -135,22 +275,22 @@ def add_device(devices, network):
 
     network_id = network_row.id
 
-    for i in devices.to_dict(orient="records"):
-        mac = i.get('MAC_Address')
+    for record in devices.to_dict(orient="records"):
+        mac = record.get('MAC_Address')
         if not mac:
             stats["skipped"] += 1
             continue
 
-        incoming_confidence = i.get('Confidence')
+        incoming_confidence = record.get('Confidence')
         try:
             incoming_confidence = float(incoming_confidence) if incoming_confidence is not None else None
-            if incoming_confidence != incoming_confidence:  # NaN check
+            if pd.isna(incoming_confidence):
                 incoming_confidence = None
         except (TypeError, ValueError):
             incoming_confidence = None
 
         try:
-            existing = db.query(Device).filter_by(mac_address=mac, Network_id=network_id).first()
+            existing = db.query(Device).filter_by(mac_address=mac, network_id=network_id).first()
             if existing:
                 should_replace = (
                     incoming_confidence is not None
@@ -158,9 +298,9 @@ def add_device(devices, network):
                 )
 
                 if should_replace:
-                    existing.device_name = i.get('Predicted_Device') or existing.device_name
-                    existing.device_type = i.get('Predicted_Device') or existing.device_type
-                    existing.ip_address = i.get('IP_Address') or existing.ip_address
+                    existing.device_name = record.get('Predicted_Device') or existing.device_name
+                    existing.device_type = record.get('Predicted_Device') or existing.device_type
+                    existing.ip_address = record.get('IP_Address') or existing.ip_address
                     existing.confidence = incoming_confidence
                     db.commit()
                     stats["updated"] += 1
@@ -168,12 +308,12 @@ def add_device(devices, network):
                     stats["skipped"] += 1
             else:
                 device = Device(
-                    device_name=i.get('Predicted_Device') or 'Unknown',
-                    device_type=i.get('Predicted_Device') or 'Unknown',
+                    device_name=record.get('Predicted_Device') or 'Unknown',
+                    device_type=record.get('Predicted_Device') or 'Unknown',
                     mac_address=mac,
-                    ip_address=i.get('IP_Address'),
+                    ip_address=record.get('IP_Address'),
                     confidence=incoming_confidence,
-                    Network_id=network_id
+                    network_id=network_id
                 )
                 _add_model_instance(db, device)
                 stats["inserted"] += 1
@@ -184,76 +324,56 @@ def add_device(devices, network):
     db.close()
     return stats
 
+
 def get_devices_by_network(network_name):
-    """Get all devices associated with a specific network"""
+    """Return all devices associated with the named network.
+
+    Parameters
+    ----------
+    network_name : str
+        Name of the network to query.
+
+    Returns
+    -------
+    list[Device]
+        All Device instances belonging to the network.
+
+    Raises
+    ------
+    ValueError
+        If no network with the given name exists in the database.
+    """
     db = SessionLocal()
     network = db.query(Network).filter_by(network_name=network_name).first()
     if not network:
         db.close()
         raise ValueError(f"Network '{network_name}' not found.")
-    devices = network.devices
+    devices = list(network.devices)  # eager-load before session close to avoid DetachedInstanceError
     db.close()
     return devices
 
 
 def all_networks():
-    """Get a list of all networks in the database"""
+    """Return all Network records stored in the database.
+
+    Returns
+    -------
+    list[Network]
+        All Network instances.
+    """
     db = SessionLocal()
     networks = db.query(Network).all()
     db.close()
     return networks
 
-# ============================================================================
-# Models
-# ============================================================================
-
-class Device(Base):
-    """Device model"""
-    __tablename__ = "devices"
-    __table_args__ = (
-        UniqueConstraint("mac_address", "Network_id", name="uq_devices_mac_network"),
-    )
-
-    id = Column(Integer, primary_key=True, index=True)
-    device_name = Column(String, index=True, nullable=False)
-    device_type = Column(String, nullable=False)
-    mac_address = Column(String, nullable=False)
-    ip_address = Column(String)
-    confidence = Column(Float)
-    Network_id = Column(Integer, ForeignKey("networks.id"), nullable=False)
-
-    # Relationship
-    network = relationship("Network", back_populates="devices")
-
-
-class Network(Base):
-    """Network model"""
-    __tablename__ = "networks"
-
-    id = Column(Integer, primary_key=True, index=True)
-    network_name = Column(String, unique=True, index=True, nullable=False)
-
-    # Relationship
-    devices = relationship("Device", back_populates="network")
-
-# ============================================================================
-# Usage Examples
-# ============================================================================
 
 if __name__ == "__main__":
-    # Create all tables
     create_all_tables()
-    
-    # Get a session
+
     db = SessionLocal()
-    
+
     devices = get_devices_by_network("Default_Network")
     for device in devices:
         print(f"Device: {device.device_name}, MAC: {device.mac_address}, Confidence: {device.confidence}")
-    
+
     db.close()
-
-
-
-
-

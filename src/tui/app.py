@@ -40,8 +40,6 @@ else:
 # Configuration constants
 # -----------------------------------------------------------------------------
 CREATE_NETWORK_OPTION = "+ Create new network..."
-DEFAULT_CLASSIFICATION_FILE = "data/processed/16-09-24_extracted.csv"
-DEFAULT_REPORT_INPUT = "data/processed/16-09-24_extracted.csv"
 DEFAULT_REPORT_OUTPUT = "data/reports/report.txt"
 STATUS_STEP_DELAY_SECONDS = 0.15
 DEFAULT_CAPTURE_PACKET_COUNT = 100
@@ -520,8 +518,6 @@ class App(TextualApp):
                 latest = max(csv_candidates, key=lambda path: path.stat().st_mtime)
                 return str(latest)
 
-        if Path(DEFAULT_CLASSIFICATION_FILE).exists():
-            return DEFAULT_CLASSIFICATION_FILE
         return None
 
     @staticmethod
@@ -687,7 +683,7 @@ class App(TextualApp):
 
     def _prompt_report_source_file(self) -> None:
         """Prompt user to choose which CSV file to use for report generation."""
-        default_source = self.selected_report_file or self._resolve_classification_file() or DEFAULT_REPORT_INPUT
+        default_source = self.selected_report_file or self._resolve_classification_file() or ""
         self.push_screen(
             FilePathPromptScreen("Enter source file (.csv or .pcap) for report generation:", default_source, "report-file-input"),
             self._handle_report_source_file_result,
@@ -861,7 +857,7 @@ class App(TextualApp):
     # ----- Live capture flow -------------------------------------------------
     def _prompt_classification_file(self) -> None:
         """Prompt user to choose which source file to use for classification."""
-        default_source = self.selected_classification_file or self._resolve_classification_file() or DEFAULT_CLASSIFICATION_FILE
+        default_source = self.selected_classification_file or self._resolve_classification_file() or ""
         self.push_screen(
             FilePathPromptScreen("Enter source file (.csv or .pcap) for classification:", default_source, "classification-file-input"),
             self._handle_classification_file_result,
@@ -1209,8 +1205,7 @@ class App(TextualApp):
             self.status_message = "Pick a valid network before applying"
             self._render_welcome()
             return
-
-        self._require_password_then("changing network", lambda: self._apply_network_selection(selected))
+        self._apply_network_selection(selected)
 
     def _open_create_network_prompt(self) -> None:
         """Open create-network prompt after authentication succeeds."""

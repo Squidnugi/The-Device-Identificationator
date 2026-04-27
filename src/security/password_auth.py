@@ -44,5 +44,11 @@ def verify_password(password: str) -> bool:
 
 
 def is_password_set() -> bool:
-    """Return True when a password hash has been saved to the auth config file."""
-    return CONFIG_PATH.exists()
+    """Return True when a valid password hash has been saved to the auth config file."""
+    if not CONFIG_PATH.exists():
+        return False
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+        return bool(data.get("password_hash"))
+    except (json.JSONDecodeError, OSError):
+        return False

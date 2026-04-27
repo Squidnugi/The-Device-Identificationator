@@ -11,12 +11,42 @@ from functools import wraps
 
 import click
 import src
-from src.config import NETWORK_CONFIG_PATH, DATA_DIRECTORIES
+from src.config import NETWORK_CONFIG_PATH, DATA_DIRECTORIES, DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_MARGIN_THRESHOLD
 
 
 DEFAULT_NETWORK_NAME = "Default_Network"
 SUPPORTED_TRAFFIC_EXTENSIONS = {".csv", ".pcap", ".pcapng"}
-FLAGGED_CONFIDENCE_THRESHOLD = 0.7
+
+ASCII_BANNER = r"""
+
+██████╗ ███████╗██╗   ██╗██╗ ██████╗███████╗                                                                                         
+██╔══██╗██╔════╝██║   ██║██║██╔════╝██╔════╝                                                                                         
+██║  ██║█████╗  ██║   ██║██║██║     █████╗                                                                                           
+██║  ██║██╔══╝  ╚██╗ ██╔╝██║██║     ██╔══╝                                                                                           
+██████╔╝███████╗ ╚████╔╝ ██║╚██████╗███████╗                                                                                         
+╚═════╝ ╚══════╝  ╚═══╝  ╚═╝ ╚═════╝╚══════╝                                                                                         
+                                                                                                                                     
+██╗██████╗ ███████╗███╗   ██╗████████╗██╗███████╗██╗ ██████╗ █████╗ ████████╗██╗ ██████╗ ███╗   ██╗ █████╗ ████████╗ ██████╗ ██████╗ 
+██║██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██║██╔════╝██║██╔════╝██╔══██╗╚══██╔══╝██║██╔═══██╗████╗  ██║██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗
+██║██║  ██║█████╗  ██╔██╗ ██║   ██║   ██║█████╗  ██║██║     ███████║   ██║   ██║██║   ██║██╔██╗ ██║███████║   ██║   ██║   ██║██████╔╝
+██║██║  ██║██╔══╝  ██║╚██╗██║   ██║   ██║██╔══╝  ██║██║     ██╔══██║   ██║   ██║██║   ██║██║╚██╗██║██╔══██║   ██║   ██║   ██║██╔══██╗
+██║██████╔╝███████╗██║ ╚████║   ██║   ██║██║     ██║╚██████╗██║  ██║   ██║   ██║╚██████╔╝██║ ╚████║██║  ██║   ██║   ╚██████╔╝██║  ██║
+╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚═╝     ╚═╝ ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝
+                                                                                                                                     """.lstrip("\n")
+
+COMMANDS = [
+    ("intro",       "Show this introduction screen"),
+    ("setup",       "Create network, password, and initialise the database"),
+    ("identifier",  "Run device identification analysis on a traffic file"),
+    ("scanner",     "Capture and identify live network traffic"),
+    ("report",      "Generate or read a device classification report"),
+    ("network",     "View or manage networks"),
+    ("device",      "View or analyse a specific device"),
+    ("flagged",     "View low-confidence flagged devices"),
+    ("clear",       "Clear all data and reset the application"),
+    ("dashboard",   "Open the dashboard TUI"),
+    ("app",         "Run the full Textual TUI application"),
+]
 
 
 def _read_current_network() -> str | None:
@@ -128,21 +158,21 @@ def _echo_colored_report(report_text) -> None:
 
 @click.group()
 def cli():
-    """Device Identificationator - Wizard (DEMO)"""
+    """Device Identificationator - Wizard"""
     pass
 
 
 @cli.command()
 @click.option("--change", is_flag=True, help="Change command password")
 def setup(change):
-    """Create Network, password, and initialise database (DEMO)"""
+    """Create Network, password, and initialise database"""
     if change:
         if not _require_command_password():
             return
         click.echo(click.style("Changing command password...", fg="green", bold=True))
         password = click.prompt("New command password", hide_input=True, confirmation_prompt=True)
         src.set_password(password)
-        click.echo(click.style("Command password changed! (DEMO)", fg="green", bold=True))
+        click.echo(click.style("Command password changed!", fg="green", bold=True))
         return
 
     src.create_all_tables()
@@ -163,21 +193,21 @@ def setup(change):
 
 
 @cli.command()
-@click.option("--file", default="data/processed/16-09-24_extracted.csv", help="Path to the dataset file")
+@click.option("--file", required=True, help="Path to the dataset file (.csv, .pcap, or .pcapng)")
 @click.option(
-    "--confidence-threshold", default=0.60, show_default=True,
+    "--confidence-threshold", default=DEFAULT_CONFIDENCE_THRESHOLD, show_default=True,
     type=click.FloatRange(0.0, 1.0),
     help="Minimum confidence required before classifying a device.",
 )
 @click.option(
-    "--margin-threshold", default=0.10, show_default=True,
+    "--margin-threshold", default=DEFAULT_MARGIN_THRESHOLD, show_default=True,
     type=click.FloatRange(0.0, 1.0),
     help="Minimum top-1 vs top-2 probability margin required before classifying a device.",
 )
 @_require_command_authentication()
 @_require_network_configured()
 def identifier(file, confidence_threshold, margin_threshold):
-    """Run device identification analysis (DEMO)"""
+    """Run device identification analysis"""
     source_path = Path(file)
     if not source_path.exists():
         click.echo(click.style(f"Dataset file not found: {file}", fg="red", bold=True))
@@ -198,13 +228,21 @@ def identifier(file, confidence_threshold, margin_threshold):
         click.echo(click.style("Processing pcap file...", fg="green", bold=True))
         data = src.process_pcap(file, save_to_csv=False)
 
-    results = src.use_model(
-        file_path=file,
-        dataset=data,
-        confidence_threshold=confidence_threshold,
-        margin_threshold=margin_threshold,
-    )
-    click.echo(click.style("Analysis complete! (DEMO)", fg="green", bold=True))
+    try:
+        results = src.use_model(
+            file_path=file,
+            dataset=data,
+            confidence_threshold=confidence_threshold,
+            margin_threshold=margin_threshold,
+        )
+    except FileNotFoundError as exc:
+        click.echo(click.style(str(exc), fg="red", bold=True))
+        return
+    except Exception as exc:
+        click.echo(click.style(f"Identification failed: {exc}", fg="red", bold=True))
+        return
+
+    click.echo(click.style("Analysis complete!", fg="green", bold=True))
     click.echo(click.style(results.to_string(), fg="green", bold=True))
     network = grab_network()
     src.add_device(results, network)
@@ -218,7 +256,7 @@ def identifier(file, confidence_threshold, margin_threshold):
 @click.option("--interface", default="eth0", show_default=True, help="Network interface to capture on (Linux/Unix)")
 @_require_command_authentication()
 def scanner(packets, interface):
-    """Run a network scan (DEMO)"""
+    """Run a network scan"""
     click.echo(click.style("Running device scanning...", fg="green", bold=True))
     capture_result = src.capture_and_process_packets(packet_count=packets, interface=interface)
     if capture_result is None:
@@ -227,17 +265,17 @@ def scanner(packets, interface):
 
     click.echo(click.style(f"PCAP saved to: {capture_result['pcap_file']}", fg="cyan", bold=True))
     click.echo(click.style(f"Processed CSV saved to: {capture_result['processed_csv']}", fg="cyan", bold=True))
-    click.echo(click.style("Scanning complete! (DEMO)", fg="green", bold=True))
+    click.echo(click.style("Scanning complete!", fg="green", bold=True))
 
 
 @cli.command()
 @click.option("--report-file", default="data/reports/report.txt", help="Path to save the generated report")
-@click.option("--file", default="data/processed/16-09-24_extracted.csv", help="Path to the dataset file")
+@click.option("--file", default=None, help="Path to the dataset file (.csv, .pcap, or .pcapng)")
 @click.option("--read", default=None, help="Read and display an existing report")
 @_require_command_authentication()
 @_require_network_configured()
 def report(report_file, file, read):
-    """Generate a report (DEMO)"""
+    """Generate a report"""
     network = grab_network()
     if read:
         try:
@@ -246,6 +284,12 @@ def report(report_file, file, read):
         except FileNotFoundError:
             click.echo(click.style("Report not found.", fg="red", bold=True))
     else:
+        if file is None:
+            click.echo(click.style(
+                "No input file provided. Use --file to specify a .csv, .pcap, or .pcapng file.",
+                fg="red", bold=True,
+            ))
+            return
         if not Path(file).exists():
             click.echo(click.style(f"Report source file not found: {file}", fg="red", bold=True))
             return
@@ -277,45 +321,64 @@ def report(report_file, file, read):
 @click.option("--view", is_flag=True, help="View all Networks")
 @click.option("--create", is_flag=True, help="Create a new Network")
 def network(change, view, create):
-    """View or change the current network (DEMO)"""
+    """View or change the current network"""
     if sum([bool(change), view, create]) > 1:
         click.echo(click.style("Please choose only one option: --change, --view, or --create", fg="red", bold=True))
         return
     if change:
         click.echo(click.style("Changing network...", fg="green", bold=True))
-        if not _require_command_password():
-            return
+        requested_network = str(change)
         try:
-            src.add_to_network(change)
+            existing_networks = src.all_networks()
         except Exception as exc:
-            click.echo(click.style(f"Failed to update network: {exc}", fg="red", bold=True))
+            click.echo(click.style(f"Failed to load networks: {exc}", fg="red", bold=True))
             return
-        _write_current_network(change)
-        click.echo(click.style("Network changed! (DEMO)", fg="green", bold=True))
+
+        if not any(net.network_name == requested_network for net in existing_networks):
+            click.echo(click.style(
+                f"Network '{requested_network}' does not exist. Use --create to add it first.",
+                fg="red",
+                bold=True,
+            ))
+            return
+
+        _write_current_network(requested_network)
+        click.echo(click.style("Network changed!", fg="green", bold=True))
     elif view:
-        click.echo(click.style("Viewing all networks... (DEMO)", fg="green", bold=True))
+        click.echo(click.style("Viewing all networks...", fg="green", bold=True))
         networks = src.all_networks()
         for net in networks:
             click.echo(click.style(f"- {net.network_name}", fg="green", bold=True))
-        click.echo(click.style("All networks displayed! (DEMO)", fg="green", bold=True))
+        click.echo(click.style("All networks displayed!", fg="green", bold=True))
     elif create:
         click.echo(click.style("Creating new network...", fg="green", bold=True))
         if not _require_command_password():
             return
-        new_network = click.prompt("Enter new network name", default="New_Network")
+        new_network = click.prompt("Enter new network name", default=None, show_default=False)
+
+        try:
+            existing_networks = src.all_networks()
+        except Exception as exc:
+            click.echo(click.style(f"Failed to load networks: {exc}", fg="red", bold=True))
+            return
+
+        if any(net.network_name == new_network for net in existing_networks):
+            click.echo(click.style(f"Network '{new_network}' already exists.", fg="yellow", bold=True))
+            return
+
         try:
             src.add_to_network(new_network)
         except Exception as exc:
             click.echo(click.style(f"Failed to create network: {exc}", fg="red", bold=True))
             return
-        click.echo(click.style("New network created! (DEMO)", fg="green", bold=True))
+        click.echo(click.style("New network created!", fg="green", bold=True))
     else:
-        click.echo(click.style("Current network: (DEMO)", fg="green", bold=True))
+        click.echo(click.style("Current network: ", fg="green", bold=True))
         current_network = _read_current_network()
         if current_network:
             click.echo(click.style(current_network, fg="green", bold=True))
         else:
-            click.echo(click.style("No network set. (DEMO)", fg="yellow", bold=True))
+            click.echo(click.style("No network set.", fg="yellow", bold=True))
 
 
 @cli.command()
@@ -323,7 +386,7 @@ def network(change, view, create):
 @_require_command_authentication()
 @_require_network_configured()
 def device(device):
-    """View or analyze a specific device (DEMO)"""
+    """View or analyze a specific device"""
     if device:
         click.echo(click.style(f"Analyzing device {device}...", fg="green", bold=True))
         devices = src.get_devices_by_network(grab_network())
@@ -334,9 +397,9 @@ def device(device):
             click.echo(click.style(f"MAC Address: {device_info.mac_address}", fg="green", bold=True))
             click.echo(click.style(f"IP Address: {device_info.ip_address}", fg="green", bold=True))
             click.echo(click.style(f"Confidence: {device_info.confidence}", fg="green", bold=True))
-        click.echo(click.style("Device analysis complete! (DEMO)", fg="green", bold=True))
+        click.echo(click.style("Device analysis complete!", fg="green", bold=True))
     else:
-        click.echo(click.style("All devices. (DEMO)", fg="green", bold=True))
+        click.echo(click.style("All devices.", fg="green", bold=True))
         devices = src.get_devices_by_network(grab_network())
         for dev in devices:
             click.echo(click.style(f"- {dev.device_name} ({dev.mac_address})", fg="green", bold=True))
@@ -345,42 +408,72 @@ def device(device):
 @cli.command()
 @_require_command_authentication()
 def clear():
-    """Clear all data and reset the application (DEMO)"""
+    """Clear all data and reset the application"""
+    click.echo(click.style("WARNING: This will delete all data and reset the application!", fg="red", bold=True))
+    if not click.confirm(click.style("Are you sure you want to continue?", fg="yellow", bold=True)):
+        click.echo(click.style("Operation cancelled.", fg="green", bold=True))
+        return
     click.echo(click.style("Clearing all data...", fg="green", bold=True))
     for directory in DATA_DIRECTORIES:
         shutil.rmtree(directory, ignore_errors=True)
     for directory in DATA_DIRECTORIES:
         os.makedirs(directory, exist_ok=True)
-    click.echo(click.style("All data cleared! (DEMO)", fg="green", bold=True))
+    click.echo(click.style("All data cleared!", fg="green", bold=True))
 
 
 @cli.command()
 @_require_command_authentication()
 @_require_network_configured()
 def flagged():
-    """View flagged devices (DEMO)"""
+    """View flagged devices"""
     click.echo(click.style("Viewing flagged devices...", fg="green", bold=True))
     devices = src.get_devices_by_network(grab_network())
     for dev in devices:
-        if dev.confidence < FLAGGED_CONFIDENCE_THRESHOLD:
+        if dev.confidence < DEFAULT_CONFIDENCE_THRESHOLD:
             click.echo(click.style(f"- {dev.device_name} ({dev.mac_address})", fg="red", bold=True))
-    click.echo(click.style("Flagged devices displayed! (DEMO)", fg="green", bold=True))
+    click.echo(click.style("Flagged devices displayed!", fg="green", bold=True))
 
 
 @cli.command()
 def dashboard():
-    """View the dashboard (DEMO)"""
+    """View the dashboard"""
     click.echo(click.style("Opening dashboard...", fg="green", bold=True))
     src.DashboardApp().run()
-    click.echo(click.style("Dashboard displayed! (DEMO)", fg="green", bold=True))
+    click.echo(click.style("Dashboard displayed!", fg="green", bold=True))
 
 
 @cli.command(name="app")
 def application():
-    """Run the application (DEMO)"""
+    """Run the application"""
     click.echo(click.style("Running the application...", fg="green", bold=True))
     src.run_app()
-    click.echo(click.style("Application is running! (DEMO)", fg="green", bold=True))
+    click.echo(click.style("Application is running!", fg="green", bold=True))
+
+
+@cli.command()
+def intro():
+    """Show the introduction screen with ASCII art and command reference."""
+    click.echo()
+    click.echo(click.style(ASCII_BANNER, fg="magenta", bold=True))
+    click.echo()
+    click.echo(click.style(
+        "  The Device Identificationator -- Network Device Classification Tool",
+        fg="white",
+    ))
+    click.echo()
+    col_width = max(len(cmd) for cmd, _ in COMMANDS) + 2
+    click.echo(click.style(f"  {'Command':<{col_width}}Description", fg="cyan", bold=True))
+    click.echo(click.style(f"  {'-' * col_width}{'-' * 40}", fg="cyan"))
+    for cmd, desc in COMMANDS:
+        click.echo(
+            click.style(f"  {cmd:<{col_width}}", fg="cyan", bold=True)
+            + click.style(desc, fg="white")
+        )
+    click.echo()
+    click.echo(click.style(
+        "  Run: python main.py <command> --help  for details",
+        fg="white", dim=True,
+    ))
 
 
 def main():

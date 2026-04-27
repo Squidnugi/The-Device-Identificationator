@@ -2,6 +2,8 @@
 import os
 import pickle
 import time
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,17 +13,31 @@ from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
+try:
+    from ..datapipeline.pcap import load_datasets
+    from ..config import DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_MARGIN_THRESHOLD
+except ImportError:
+    if __package__ in (None, ""):
+        project_root = Path(__file__).resolve().parents[2]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        from src.datapipeline.pcap import load_datasets
+        from src.config import DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_MARGIN_THRESHOLD
+    else:
+        raise
+
 
 # ---------------------------------------------------------------------------
 # Model hyperparameters and classification thresholds
 # ---------------------------------------------------------------------------
-DEFAULT_CONFIDENCE_THRESHOLD = 0.70
-DEFAULT_MARGIN_THRESHOLD = 0.12
 RF_N_ESTIMATORS = 150
 RF_RANDOM_STATE = 42
 RF_TEST_SIZE = 0.3
-MAX_TRAINING_ROWS = 2_000_000
-TRAIN_ACCURACY_SAMPLE_SIZE = 200_000
+RF_MAX_DEPTH = 8
+RF_MIN_SAMPLES_SPLIT = 100
+RF_MIN_SAMPLES_LEAF = 50
+MAX_TRAINING_ROWS = 21_000_000
+TRAIN_ACCURACY_SAMPLE_SIZE = 2_000_000
 DEFAULT_MODEL_PATH = "models/random_forest_model"
 
 
@@ -51,9 +67,9 @@ def _train_classifier(features, labels):
         n_estimators=RF_N_ESTIMATORS,
         random_state=RF_RANDOM_STATE,
         class_weight="balanced",
-        max_depth=8,
-        min_samples_split=100,
-        min_samples_leaf=50,
+        max_depth=RF_MAX_DEPTH,
+        min_samples_split=RF_MIN_SAMPLES_SPLIT,
+        min_samples_leaf=RF_MIN_SAMPLES_LEAF,
         max_features="sqrt",
         n_jobs=-1,
     )
@@ -271,24 +287,6 @@ def load_model(path):
     return model, encoder, scaler
 
 
-def load_datasets(path):
-    """Load a CSV dataset from disk into a DataFrame.
-
-    Parameters
-    ----------
-    path : str
-        Path to a .csv file.
-
-    Returns
-    -------
-    pd.DataFrame
-        Raw dataset.
-    """
-    if path.endswith(".csv"):
-        return pd.read_csv(path)
-    raise ValueError(f"Unsupported file format: {path}")
-
-
 def encode_data(data, label_encoders=None):
     """Encode categorical columns to numeric using LabelEncoder.
 
@@ -409,7 +407,7 @@ def dataset_split(
 
 
 def train_model(
-    dataset_path="data/processed/16-09-23_extracted.csv",
+    dataset_path="data/processed/merged_training_extracted.csv",
     model_path=DEFAULT_MODEL_PATH,
     max_rows=MAX_TRAINING_ROWS,
 ):
@@ -458,7 +456,7 @@ def train_model(
 
 
 def use_model(
-    file_path="data/processed/16-10-12_extracted.csv",
+    file_path=None,
     dataset=None,
     confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
     margin_threshold=DEFAULT_MARGIN_THRESHOLD,
@@ -515,5 +513,4 @@ def use_model(
 
 
 if __name__ == "__main__":
-    results = use_model()
-    print(results)
+    train_model(dataset_path="data/processed/16-09-23_extracted.csv", model_path="models/random_forest_model_test")

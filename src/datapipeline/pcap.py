@@ -1,5 +1,6 @@
 """PCAP ingestion pipeline: raw packet files to feature-engineered DataFrames."""
 import os
+import time
 import traceback
 from pathlib import Path
 
@@ -7,8 +8,37 @@ import numpy as np
 import pandas as pd
 from scipy.stats import entropy
 from scapy.all import rdpcap, IP, TCP, UDP, Ether, DNS, DNSQR, Raw
-import time
 from tqdm import tqdm
+
+ROLLING_WINDOW = 100  # packets to look back per device for rolling features
+
+
+def _rolling_nunique(arr):
+    """Return the count of unique values in *arr*."""
+    if len(arr) == 0:
+        return 0.0
+    return float(len(np.unique(arr)))
+
+
+def _rolling_entropy(arr):
+    """Return the Shannon entropy of positive values in *arr* using a histogram approximation."""
+    arr = arr[arr > 0]
+    if len(arr) == 0:
+        return 0.0
+    hist, _ = np.histogram(arr, bins=min(20, len(arr)))
+    if hist.sum() == 0:
+        return 0.0
+    nonzero_probs = hist / hist.sum()
+    nonzero_probs = nonzero_probs[nonzero_probs > 0]
+    return float(entropy(nonzero_probs))
+
+
+def _rolling_mode(arr):
+    """Return the most frequently occurring value in *arr*."""
+    if len(arr) == 0:
+        return 0.0
+    vals, counts = np.unique(arr, return_counts=True)
+    return float(vals[np.argmax(counts)])
 
 
 def load_datasets(path):
@@ -28,6 +58,90 @@ def load_datasets(path):
     if path.endswith(".pcap") or path.endswith(".pcapng"):
         return pcap_to_dataframe(path)
     raise ValueError(f"Unsupported file format: {path}")
+
+
+def _extract_packet_fields(pkt, idx):
+    """Extract layer fields from a single Scapy packet into a flat dictionary.
+
+    Parameters
+    ----------
+    pkt : scapy.packet.Packet
+        A single captured packet.
+    idx : int
+        Packet index used as the Packet ID field.
+
+    Returns
+    -------
+    dict
+        Flat mapping of field names to extracted values.
+    """
+    packet_info = {
+        "Packet ID": idx,
+        "TIME": float(pkt.time) if hasattr(pkt, "time") else 0,
+        "Size": len(pkt),
+    }
+
+    if Ether in pkt:
+        eth = pkt[Ether]
+        packet_info["eth.src"] = eth.src
+        packet_info["eth.dst"] = eth.dst
+    else:
+        packet_info["eth.src"] = "N/A"
+        packet_info["eth.dst"] = "N/A"
+
+    if IP in pkt:
+        ip = pkt[IP]
+        packet_info["IP.src"] = ip.src
+        packet_info["IP.dst"] = ip.dst
+        packet_info["IP.proto"] = ip.proto
+        packet_info["IP.ttl"] = ip.ttl
+        packet_info["IP.len"] = ip.len
+
+        if TCP in pkt:
+            tcp = pkt[TCP]
+            packet_info["port.src"] = tcp.sport
+            packet_info["port.dst"] = tcp.dport
+            packet_info["TCP.flags"] = tcp.flags
+            packet_info["TCP.window"] = tcp.window
+        elif UDP in pkt:
+            udp = pkt[UDP]
+            packet_info["port.src"] = udp.sport
+            packet_info["port.dst"] = udp.dport
+            packet_info["TCP.flags"] = 0
+            packet_info["TCP.window"] = 0
+        else:
+            packet_info["port.src"] = 0
+            packet_info["port.dst"] = 0
+            packet_info["TCP.flags"] = 0
+            packet_info["TCP.window"] = 0
+    else:
+        packet_info["IP.src"] = "N/A"
+        packet_info["IP.dst"] = "N/A"
+        packet_info["IP.proto"] = 0
+        packet_info["IP.ttl"] = 0
+        packet_info["IP.len"] = 0
+        packet_info["port.src"] = 0
+        packet_info["port.dst"] = 0
+        packet_info["TCP.flags"] = 0
+        packet_info["TCP.window"] = 0
+
+    packet_info["Is_DNS"] = 0
+    packet_info["DNS_Query"] = None
+    if UDP in pkt and DNS in pkt:
+        try:
+            dns = pkt[DNS]
+            if dns.qr == 0 and DNSQR in pkt:
+                packet_info["Is_DNS"] = 1
+                dnsqr = pkt[DNSQR]
+                packet_info["DNS_Query"] = (
+                    dnsqr.qname.decode()
+                    if isinstance(dnsqr.qname, bytes)
+                    else str(dnsqr.qname)
+                )
+        except Exception as exc:
+            print(f"Error extracting DNS query: {exc}")
+
+    return packet_info
 
 
 def pcap_to_dataframe(pcap_path):
@@ -64,74 +178,7 @@ def pcap_to_dataframe(pcap_path):
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
         )):
             try:
-                packet_info = {
-                    "Packet ID": idx,
-                    "TIME": float(pkt.time) if hasattr(pkt, "time") else 0,
-                    "Size": len(pkt),
-                }
-
-                if Ether in pkt:
-                    eth = pkt[Ether]
-                    packet_info["eth.src"] = eth.src
-                    packet_info["eth.dst"] = eth.dst
-                else:
-                    packet_info["eth.src"] = "N/A"
-                    packet_info["eth.dst"] = "N/A"
-
-                if IP in pkt:
-                    ip = pkt[IP]
-                    packet_info["IP.src"] = ip.src
-                    packet_info["IP.dst"] = ip.dst
-                    packet_info["IP.proto"] = ip.proto
-                    packet_info["IP.ttl"] = ip.ttl
-                    packet_info["IP.len"] = ip.len
-
-                    if TCP in pkt:
-                        tcp = pkt[TCP]
-                        packet_info["port.src"] = tcp.sport
-                        packet_info["port.dst"] = tcp.dport
-                        packet_info["TCP.flags"] = tcp.flags
-                        packet_info["TCP.window"] = tcp.window
-                    elif UDP in pkt:
-                        udp = pkt[UDP]
-                        packet_info["port.src"] = udp.sport
-                        packet_info["port.dst"] = udp.dport
-                        packet_info["TCP.flags"] = 0
-                        packet_info["TCP.window"] = 0
-                    else:
-                        packet_info["port.src"] = 0
-                        packet_info["port.dst"] = 0
-                        packet_info["TCP.flags"] = 0
-                        packet_info["TCP.window"] = 0
-                else:
-                    packet_info["IP.src"] = "N/A"
-                    packet_info["IP.dst"] = "N/A"
-                    packet_info["IP.proto"] = 0
-                    packet_info["IP.ttl"] = 0
-                    packet_info["IP.len"] = 0
-                    packet_info["port.src"] = 0
-                    packet_info["port.dst"] = 0
-                    packet_info["TCP.flags"] = 0
-                    packet_info["TCP.window"] = 0
-
-                packet_info["Is_DNS"] = 0
-                packet_info["DNS_Query"] = None
-                if UDP in pkt and DNS in pkt:
-                    try:
-                        dns = pkt[DNS]
-                        if dns.qr == 0 and DNSQR in pkt:
-                            packet_info["Is_DNS"] = 1
-                            dnsqr = pkt[DNSQR]
-                            packet_info["DNS_Query"] = (
-                                dnsqr.qname.decode()
-                                if isinstance(dnsqr.qname, bytes)
-                                else str(dnsqr.qname)
-                            )
-                    except Exception as exc:
-                        print(f"Error extracting DNS query: {exc}")
-
-                packets_data.append(packet_info)
-
+                packets_data.append(_extract_packet_fields(pkt, idx))
             except Exception as exc:
                 print(f"Error processing packet: {exc}")
                 continue
@@ -220,9 +267,11 @@ def calculate_packet_rate(data):
     Returns
     -------
     pd.DataFrame
-        Same DataFrame with new feature columns appended.
+        Same DataFrame sorted by [eth.src, TIME] with new feature columns appended.
     """
     print("\nCalculating packet rate and features...")
+
+    data = data.sort_values(["eth.src", "TIME"]).reset_index(drop=True)
 
     with tqdm(total=6, desc="Feature extraction", unit=" features") as pbar:
         data["Packet_Rate"] = data.groupby("eth.src").cumcount() + 1
@@ -233,23 +282,32 @@ def calculate_packet_rate(data):
         )
         pbar.update(1)
 
-        data["Avg_Size_Per_Device"] = data.groupby("eth.src")["Size"].transform("mean")
+        data["Avg_Size_Per_Device"] = data.groupby("eth.src")["Size"].transform(
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=1).mean()
+        )
         data["Avg_Size_Per_Device"] = data["Avg_Size_Per_Device"] / data["Size"].max()
         pbar.update(1)
 
-        data["TCP_Ratio"] = data.groupby("eth.src")["IP.proto"].transform(
-            lambda x: (x == 6).sum() / len(x) if len(x) > 0 else 0
+        data["_is_tcp"] = (data["IP.proto"] == 6).astype(float)
+        data["TCP_Ratio"] = data.groupby("eth.src")["_is_tcp"].transform(
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=1).mean()
+        )
+        data.drop(columns=["_is_tcp"], inplace=True)
+        pbar.update(1)
+
+        data["Port_Diversity"] = data.groupby("eth.src")["port.dst"].transform(
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=1).apply(
+                _rolling_nunique, raw=True
+            )
         )
         pbar.update(1)
 
-        data["Port_Diversity"] = data.groupby("eth.src")["port.dst"].transform("nunique")
+        data["Src_Port_Variance"] = data.groupby("eth.src")["port.src"].transform(
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=2).std().fillna(0)
+        )
         pbar.update(1)
 
-        data["Src_Port_Variance"] = data.groupby("eth.src")["port.src"].transform("std")
-        data["Src_Port_Variance"] = data["Src_Port_Variance"].fillna(0)
-        pbar.update(1)
-
-    print("✓ Features calculated successfully\n")
+    print("[OK] Features calculated successfully\n")
     return data
 
 
@@ -259,41 +317,36 @@ def calculate_advanced_features(data):
     Parameters
     ----------
     data : pd.DataFrame
-        Packet DataFrame after ``calculate_packet_rate``.
+        Packet DataFrame after ``calculate_packet_rate`` (already sorted by
+        [eth.src, TIME]).
 
     Returns
     -------
     pd.DataFrame
         Same DataFrame with additional feature columns appended.
+        ``Unique_Src_IPs`` and ``Unique_Dst_IPs`` are intentionally omitted —
+        IP-based counts are network-topology-dependent and do not generalise.
     """
     print("\nCalculating advanced features...")
 
-    with tqdm(total=7, desc="Advanced features", unit=" features") as pbar:
-        data["Unique_Src_IPs"] = data.groupby("eth.src")["IP.src"].transform("nunique")
-        pbar.update(1)
-
-        data["Unique_Dst_IPs"] = data.groupby("eth.src")["IP.dst"].transform("nunique")
-        pbar.update(1)
-
+    with tqdm(total=5, desc="Advanced features", unit=" features") as pbar:
         data["TTL_Mode"] = data.groupby("eth.src")["IP.ttl"].transform(
-            lambda x: x.mode()[0] if len(x.mode()) > 0 else 0
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=1).apply(
+                _rolling_mode, raw=True
+            )
         )
         pbar.update(1)
 
-        def calculate_size_entropy(sizes):
-            """Return Shannon entropy of the packet-size distribution."""
-            if len(sizes) == 0:
-                return 0
-            hist, _ = np.histogram(sizes[sizes > 0], bins=20)
-            hist = hist / hist.sum()
-            hist = hist[hist > 0]
-            return entropy(hist) if len(hist) > 0 else 0
-
-        data["Size_Entropy"] = data.groupby("eth.src")["Size"].transform(calculate_size_entropy)
+        data["Size_Entropy"] = data.groupby("eth.src")["Size"].transform(
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=1).apply(
+                _rolling_entropy, raw=True
+            )
+        )
         pbar.update(1)
 
-        data["Size_Std_Dev"] = data.groupby("eth.src")["Size"].transform("std")
-        data["Size_Std_Dev"] = data["Size_Std_Dev"].fillna(0)
+        data["Size_Std_Dev"] = data.groupby("eth.src")["Size"].transform(
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=2).std().fillna(0)
+        )
         pbar.update(1)
 
         data["Inter_Packet_Time"] = data.groupby("eth.src")["TIME"].transform(
@@ -301,10 +354,12 @@ def calculate_advanced_features(data):
         )
         pbar.update(1)
 
-        data["Avg_Inter_Packet_Time"] = data.groupby("eth.src")["Inter_Packet_Time"].transform("mean")
+        data["Avg_Inter_Packet_Time"] = data.groupby("eth.src")["Inter_Packet_Time"].transform(
+            lambda x: x.rolling(window=ROLLING_WINDOW, min_periods=1).mean()
+        )
         pbar.update(1)
 
-    print("✓ Advanced features calculated successfully\n")
+    print("[OK] Advanced features calculated successfully\n")
     return data
 
 
@@ -355,20 +410,30 @@ def save_dataframe_to_csv(df, output_path):
         Data to save.
     output_path : str
         Destination file path.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+        If the file cannot be written.
     """
     try:
         df.to_csv(output_path, index=False)
         print(f"DataFrame saved to {output_path}")
-    except Exception as exc:
+    except OSError as exc:
         print(f"Error saving DataFrame to CSV: {exc}")
+        raise
 
 
-def process_pcap(File="16-09-24.pcap", save_to_csv=True, train=False):
+def process_pcap(file=None, save_to_csv=True, train=False):
     """Run the full PCAP processing pipeline and optionally save to CSV.
 
     Parameters
     ----------
-    File : str
+    file : str
         Filename (relative to ``data/raw/``) or absolute/relative path to a
         .pcap or .pcapng file.
     save_to_csv : bool
@@ -383,12 +448,15 @@ def process_pcap(File="16-09-24.pcap", save_to_csv=True, train=False):
     pd.DataFrame or None
         The processed DataFrame when ``save_to_csv=False``; None otherwise.
     """
+    if not file:
+        print("Error: No PCAP file specified for processing.")
+        return None
     raw_path = "data/raw/"
     processed_path = "data/processed/"
-    if os.path.isabs(File) or os.path.exists(File):
-        pcap_path = File
+    if os.path.isabs(file) or os.path.exists(file):
+        pcap_path = file
     else:
-        pcap_path = os.path.join(raw_path, File)
+        pcap_path = os.path.join(raw_path, file)
 
     pcap_name = os.path.basename(pcap_path)
     pcap_stem, _ = os.path.splitext(pcap_name)
@@ -402,23 +470,26 @@ def process_pcap(File="16-09-24.pcap", save_to_csv=True, train=False):
 
     df = pcap_to_dataframe(pcap_path)
 
-    if not df.empty:
-        df = calculate_packet_rate(df)
-        df = calculate_advanced_features(df)
+    if df.empty:
+        print("Warning: PCAP produced no usable packets.")
+        return None
 
-        if train:
-            print("Adding device labels...")
-            df = add_labels(df)
-            # Drop packets with no matching label so the target column stays clean.
-            df = df[df["Device_Type"].notna()].copy()
-            print(f"✓ Labels added ({len(df):,} labelled rows retained)\n")
+    df = calculate_packet_rate(df)
+    df = calculate_advanced_features(df)
 
-        df = clean_data(df)
+    if train:
+        print("Adding device labels...")
+        df = add_labels(df)
+        # Drop packets with no matching label so the target column stays clean.
+        df = df[df["Device_Type"].notna()].copy()
+        print(f"✓ Labels added ({len(df):,} labelled rows retained)\n")
 
-        if save_to_csv:
-            print("Saving to CSV...")
-            save_dataframe_to_csv(df, output_csv_path)
-            print("✓ CSV saved\n")
+    df = clean_data(df)
+
+    if save_to_csv:
+        print("Saving to CSV...")
+        save_dataframe_to_csv(df, output_csv_path)
+        print("✓ CSV saved\n")
 
     time_end = time.time()
     elapsed = time_end - time_start
@@ -484,7 +555,7 @@ def process_and_merge_pcaps(
     print(f"Found {len(pcap_files)} PCAP file(s) to process.")
     for pcap_file in pcap_files:
         print(f"\nProcessing: {pcap_file}")
-        df = process_pcap(File=str(pcap_file), save_to_csv=False)
+        df = process_pcap(file=str(pcap_file), save_to_csv=False, train=True)
 
         if df is None or df.empty:
             print(f"Skipping empty/failed dataset: {pcap_file}")
@@ -504,8 +575,8 @@ def process_and_merge_pcaps(
     print(f"\nMerged dataset created: {merged_path}")
     print(f"Merged rows: {total_rows:,}")
 
-    return None, str(merged_path)
+    return str(merged_path)
 
 
 if __name__ == "__main__":
-    process_pcap(File="16-09-24.pcap", save_to_csv=True, train=True)
+    process_pcap(file="16-09-23.pcap", save_to_csv=True, train=True)
