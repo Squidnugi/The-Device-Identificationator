@@ -487,6 +487,12 @@ def use_model(
         confidence_threshold=confidence_threshold,
         margin_threshold=margin_threshold,
     )
+
+    if "IP.src" in data.columns and "eth.src" in data.columns:
+        valid_ips = data[data["IP.src"] != "N/A"]
+        ip_map = valid_ips.groupby("eth.src")["IP.src"].last()
+        results["IP_Address"] = results["MAC_Address"].map(ip_map)
+
     return results
 
 

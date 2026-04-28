@@ -1045,7 +1045,7 @@ class App(TextualApp):
             )
 
             if Path(classification_file).suffix.lower() in {".pcap", ".pcapng"}:
-                dataset = await asyncio.to_thread(process_pcap, File=classification_file, save_to_csv=False)
+                dataset = await asyncio.to_thread(process_pcap, file=classification_file, save_to_csv=False)
                 if dataset is None or dataset.empty:
                     await self._set_operation_status(
                         "Classification failed: no data extracted from selected pcap",

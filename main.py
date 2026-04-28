@@ -272,7 +272,6 @@ def scanner(packets, interface):
 @click.option("--report-file", default="data/reports/report.txt", help="Path to save the generated report")
 @click.option("--file", default=None, help="Path to the dataset file (.csv, .pcap, or .pcapng)")
 @click.option("--read", default=None, help="Read and display an existing report")
-@_require_command_authentication()
 @_require_network_configured()
 def report(report_file, file, read):
     """Generate a report"""
@@ -284,6 +283,8 @@ def report(report_file, file, read):
         except FileNotFoundError:
             click.echo(click.style("Report not found.", fg="red", bold=True))
     else:
+        if not _require_command_password():
+            return
         if file is None:
             click.echo(click.style(
                 "No input file provided. Use --file to specify a .csv, .pcap, or .pcapng file.",
@@ -383,7 +384,6 @@ def network(change, view, create):
 
 @cli.command()
 @click.option("--device", default=None, help="Look at a specific device")
-@_require_command_authentication()
 @_require_network_configured()
 def device(device):
     """View or analyze a specific device"""
@@ -422,7 +422,6 @@ def clear():
 
 
 @cli.command()
-@_require_command_authentication()
 @_require_network_configured()
 def flagged():
     """View flagged devices"""
