@@ -461,6 +461,7 @@ def process_pcap(file=None, save_to_csv=True, train=False):
     pcap_name = os.path.basename(pcap_path)
     pcap_stem, _ = os.path.splitext(pcap_name)
     output_csv_path = os.path.join(processed_path, f"{pcap_stem}_extracted.csv")
+    Path(processed_path).mkdir(parents=True, exist_ok=True)
 
     time_start = time.time()
     print(f"\n{'='*70}")

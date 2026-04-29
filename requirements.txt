@@ -1,15 +1,12 @@
 pandas
 numpy
-matplotlib
 scikit-learn
-pytest
 sqlalchemy
 scapy
 bcrypt
 click
 textual
 rich
-tpdm
+tqdm
 scipy
-uncimlrepo
 bcrypt

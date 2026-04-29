@@ -92,6 +92,12 @@ The full interactive interface — includes network management, device classific
 python main.py app
 ```
 
+> **Linux users:** Run the TUI with `sudo` to enable live packet capture, which requires root access to raw sockets. Without `sudo`, the app will launch but capture will fail.
+>
+> ```bash
+> sudo python main.py app
+> ```
+
 **TUI key bindings:**
 
 | Key | Action |
@@ -171,7 +177,14 @@ python main.py scanner --packets <n> --interface <iface>
 python main.py scanner --packets 500 --interface wlan0
 ```
 
-> Requires command password. On Windows, Scapy may require running as Administrator.
+> Requires command password. On Windows, Scapy may require running as Administrator. On Linux requires sudo to run.
+
+**Running on Linux:** The default interface is `eth0`, which was the standard name on older Linux systems. Modern Linux distributions use predictable interface names instead (e.g. `enp3s0`, `ens33`, `wlp2s0`), so `eth0` is unlikely to exist on your machine. Run `ip link show` to find your interface name, then pass it with `--interface`:
+
+```bash
+ip link show
+sudo python main.py scanner --packets 200 --interface enp3s0
+```
 
 ---
 
@@ -385,3 +398,7 @@ The-Device-Identificationator/
 - **Confidence threshold:** A device is classified as `Unknown` if its confidence is below `0.70` or the margin between the top two predictions is below `0.12`. Both thresholds can be overridden with `--confidence-threshold` and `--margin-threshold` on the `identifier` command.
 - **Device upsert:** When running classification more than once, a stored device record is only overwritten if the new run produces a strictly higher confidence score.
 - **Model artifacts:** Two files are required — `models/random_forest_model.pkl` (the classifier) and `models/random_forest_model_encoder.pkl` (the label encoders). If these are missing, run training before using `identifier` or `scanner`.
+- **Linux file permissions:** If you run any command with `sudo`, the `data/` and `config/` directories may be created as root-owned, causing permission errors on subsequent runs without `sudo`. If you encounter permission denied errors, restore ownership with:
+  ```bash
+  sudo chown -R $USER:$USER data/ config/
+  ```

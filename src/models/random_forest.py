@@ -474,6 +474,7 @@ def use_model(
 
     print("Loading model.")
     model, label_encoders = load_model(DEFAULT_MODEL_PATH)
+    model.n_jobs = 1  # avoid loky multiprocessing issues inside async/TUI contexts on Linux
     print("Encoding data.")
     encoded_data, _ = encode_data(data, label_encoders=label_encoders)
     print("Preparing features.")

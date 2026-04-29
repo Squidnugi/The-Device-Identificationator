@@ -152,7 +152,7 @@ class CaptureSettingsScreen(ModalScreen[tuple[str, str] | None]):
         yield Header(show_clock=True)
         yield Static("Configure traffic capture settings:", id="capture-settings-label")
         yield Input(value=str(self._packet_count_default), placeholder="Packet count", id="capture-packet-count-input")
-        yield Input(value=self._interface_default, placeholder="Interface (Linux only)", id="capture-interface-input")
+        yield Input(value=self._interface_default, placeholder="Interface (Linux only — e.g. enp3s0, wlan0)", id="capture-interface-input")
         yield Static("Enter in interface field to submit, Esc to cancel", id="capture-settings-help")
         yield Footer()
 
