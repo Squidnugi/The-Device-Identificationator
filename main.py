@@ -175,6 +175,19 @@ def setup(change):
         click.echo(click.style("Command password changed!", fg="green", bold=True))
         return
 
+    dirs = [
+        "config",
+        "data",
+        "data/raw",
+        "data/processed",
+        "data/reports",
+    ]
+    for d in dirs:
+        path = Path(d)
+        if not path.exists():
+            path.mkdir(parents=True)
+            click.echo(click.style(f"Created directory: {d}", fg="cyan"))
+
     src.create_all_tables()
     if src.is_password_set():
         click.echo(click.style(
