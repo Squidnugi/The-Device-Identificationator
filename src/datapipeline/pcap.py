@@ -438,7 +438,7 @@ def process_pcap(file=None, save_to_csv=True, train=False):
         .pcap or .pcapng file.
     save_to_csv : bool
         When True the extracted DataFrame is saved to ``data/processed/``.
-        When False the DataFrame is returned directly (required for inference).
+        When False the DataFrame is returned directly (required for classification).
     train : bool
         When True, device-type labels are added from the hardcoded MAC map and
         unlabelled rows are dropped before returning.

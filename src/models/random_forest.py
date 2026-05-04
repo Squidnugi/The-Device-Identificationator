@@ -113,7 +113,7 @@ def _predict_devices(
     confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
     margin_threshold=DEFAULT_MARGIN_THRESHOLD,
 ):
-    """Run inference and return per-MAC device predictions.
+    """Run classification and return per-MAC device predictions.
 
     Parameters
     ----------
@@ -278,7 +278,7 @@ def encode_data(data, label_encoders=None):
     """Encode categorical columns to numeric using LabelEncoder.
 
     In training mode (no existing encoders supplied) a new encoder is fitted
-    for each categorical column. In inference mode the existing encoders are
+    for each categorical column. In classification mode the existing encoders are
     applied; unseen categories receive a deterministic numeric bucket so the
     model can still process them without crashing.
 
@@ -309,7 +309,7 @@ def encode_data(data, label_encoders=None):
                 data[col] = label_encoder.fit_transform(data[col].astype(str))
                 label_encoders[col] = label_encoder
             else:
-                print(f"Encoding column '{col}' in inference mode.")
+                print(f"Encoding column '{col}' in classification mode.")
                 if col in label_encoders:
                     label_encoder = label_encoders[col]
                     num_known_classes = len(label_encoder.classes_)

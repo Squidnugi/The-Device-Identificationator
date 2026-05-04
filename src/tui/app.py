@@ -1040,8 +1040,8 @@ class App(TextualApp):
             await asyncio.to_thread(add_to_network, self.current_network)
 
             await self._set_operation_status(
-                "Classification in progress (4/6): running model inference",
-                "Classification 4/6: Running model inference",
+                "Classification in progress (4/6): running model classification",
+                "Classification 4/6: Running model classification",
             )
 
             if Path(classification_file).suffix.lower() in {".pcap", ".pcapng"}:
