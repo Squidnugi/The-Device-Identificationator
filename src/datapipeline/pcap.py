@@ -580,4 +580,4 @@ def process_and_merge_pcaps(
 
 
 if __name__ == "__main__":
-    process_pcap(file="fart.pcap", save_to_csv=False, train=False)
+    process_pcap(file="test.pcap", save_to_csv=False, train=False)
